@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
+
+if sys.platform.startswith("linux"):
+    if "QT_QPA_PLATFORM" not in os.environ:
+        if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
+        else:
+            os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
+    os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
 
 from PyQt6.QtCore import QProcess, Qt
 from PyQt6.QtGui import QAction

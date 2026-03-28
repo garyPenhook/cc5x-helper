@@ -49,6 +49,9 @@ case "${MODE}" in
       --exclude-module PyQt6.QtWebChannel
       --exclude-module PyQt6.QtBluetooth
       --exclude-module PyQt6.QtNfc
+      --exclude-module KDEPlasmaPlatformTheme6
+      --exclude-module breeze6
+      --exclude-module qgtk3
     )
     ;;
   *)
