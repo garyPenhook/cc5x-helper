@@ -6,8 +6,13 @@ import unittest
 from pathlib import Path
 
 from tools.cc5x_setcc_native_lib.project import (
+    delete_project_edition,
     default_project_manifest,
     load_project_file,
+    remove_project_edition_config,
+    set_project_edition,
+    update_project_edition_build_options,
+    update_project_edition_config,
     validate_project_file,
     write_project_file,
 )
@@ -68,6 +73,48 @@ class ProjectFileTests(unittest.TestCase):
             loaded = load_project_file(path)
             errors = validate_project_file(loaded)
             self.assertTrue(any("PIC10F/PIC12F/PIC16F" in error for error in errors))
+
+    def test_can_copy_and_delete_editions(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/compiler/CC5X.EXE",
+            runner="/runner/cc5x-run.sh",
+            main_source="app.c",
+        )
+        project = set_project_edition(project, "qa", from_edition="production")
+        self.assertIn("qa", project.editions)
+        project = delete_project_edition(project, "qa")
+        self.assertNotIn("qa", project.editions)
+
+    def test_can_update_edition_config(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/compiler/CC5X.EXE",
+            runner="/runner/cc5x-run.sh",
+            main_source="app.c",
+        )
+        project = update_project_edition_config(
+            project,
+            "production",
+            {"FOSC": "INTOSC", "WDTE": "OFF"},
+        )
+        self.assertEqual(project.editions["production"].config["FOSC"], "INTOSC")
+        project = remove_project_edition_config(project, "production", ["WDTE"])
+        self.assertNotIn("WDTE", project.editions["production"].config)
+
+    def test_can_replace_edition_build_options(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/compiler/CC5X.EXE",
+            runner="/runner/cc5x-run.sh",
+            main_source="app.c",
+        )
+        project = update_project_edition_build_options(
+            project,
+            "debug",
+            ["-a", "-k"],
+        )
+        self.assertEqual(project.editions["debug"].build_options, ["-a", "-k"])
 
 
 if __name__ == "__main__":

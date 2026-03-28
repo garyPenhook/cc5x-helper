@@ -25,8 +25,13 @@ from cc5x_setcc_native_lib.packs import (
 )
 from cc5x_setcc_native_lib.picmeta import load_device_metadata
 from cc5x_setcc_native_lib.project import (
+    delete_project_edition,
     default_project_manifest,
     load_project_file,
+    remove_project_edition_config,
+    set_project_edition,
+    update_project_edition_build_options,
+    update_project_edition_config,
     validate_project_file,
     write_project_file,
 )
@@ -677,6 +682,70 @@ def cmd_project_validate(args: argparse.Namespace) -> int:
     return 0 if not errors else 1
 
 
+def cmd_project_edit_edition(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    existed = args.edition in project.editions
+    try:
+        if args.delete:
+            project = delete_project_edition(project, args.edition)
+            action = "deleted"
+        else:
+            project = set_project_edition(
+                project,
+                args.edition,
+                from_edition=args.copy_from,
+            )
+            action = "updated" if existed else "created"
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    write_project_file(project, project_path)
+    print(f"{action} edition {args.edition!r} in {project_path}")
+    return 0
+
+
+def cmd_project_set_config(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    updates = parse_key_value_pairs(args.set or [])
+    try:
+        if args.remove:
+            project = remove_project_edition_config(project, args.edition, args.remove)
+        if updates or args.clear:
+            project = update_project_edition_config(
+                project,
+                args.edition,
+                updates,
+                clear=args.clear,
+            )
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
+    write_project_file(project, project_path)
+    print(f"updated config for edition {args.edition!r} in {project_path}")
+    return 0
+
+
+def cmd_project_set_build_options(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    try:
+        project = update_project_edition_build_options(
+            project,
+            args.edition,
+            args.option or [],
+        )
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
+    write_project_file(project, project_path)
+    print(f"updated build options for edition {args.edition!r} in {project_path}")
+    return 0
+
+
 def cmd_list_devices(args: argparse.Namespace) -> int:
     prefixes = tuple(
         f"PIC{family.upper()}" if not family.upper().startswith("PIC") else family.upper()
@@ -782,6 +851,36 @@ def build_parser() -> argparse.ArgumentParser:
     project_validate.add_argument("--project", default="setcc-native.json")
     project_validate.add_argument("--json", action="store_true")
     project_validate.set_defaults(func=cmd_project_validate)
+
+    project_edit_edition = subparsers.add_parser(
+        "project-edit-edition",
+        help="Create, copy, or delete editions in a setcc-native.json manifest.",
+    )
+    project_edit_edition.add_argument("--project", default="setcc-native.json")
+    project_edit_edition.add_argument("--edition", required=True)
+    project_edit_edition.add_argument("--copy-from")
+    project_edit_edition.add_argument("--delete", action="store_true")
+    project_edit_edition.set_defaults(func=cmd_project_edit_edition)
+
+    project_set_config = subparsers.add_parser(
+        "project-set-config",
+        help="Set or remove config symbol values for a named project edition.",
+    )
+    project_set_config.add_argument("--project", default="setcc-native.json")
+    project_set_config.add_argument("--edition", required=True)
+    project_set_config.add_argument("--set", action="append")
+    project_set_config.add_argument("--remove", action="append")
+    project_set_config.add_argument("--clear", action="store_true")
+    project_set_config.set_defaults(func=cmd_project_set_config)
+
+    project_set_build_options = subparsers.add_parser(
+        "project-set-build-options",
+        help="Replace the build option list for a named project edition.",
+    )
+    project_set_build_options.add_argument("--project", default="setcc-native.json")
+    project_set_build_options.add_argument("--edition", required=True)
+    project_set_build_options.add_argument("--option", action="append")
+    project_set_build_options.set_defaults(func=cmd_project_set_build_options)
 
     render_pack = subparsers.add_parser(
         "render-pack-config-section",
