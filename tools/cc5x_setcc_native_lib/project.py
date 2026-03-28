@@ -226,3 +226,27 @@ def update_project_edition_build_options(
     editions = dict(project.editions)
     editions[edition_name] = replace(edition, build_options=list(options))
     return replace(project, editions=editions)
+
+
+def project_summary(project: ProjectFile) -> dict[str, object]:
+    return {
+        "version": project.version,
+        "device": project.device,
+        "compiler": project.compiler,
+        "runner": project.runner,
+        "mplab_root": project.mplab_root,
+        "header": {
+            "mode": project.header_mode,
+            "path": project.header_path,
+        },
+        "config_source": project.config_source,
+        "main_source": project.main_source,
+        "build_options": list(project.base_build_options),
+        "editions": {
+            name: {
+                "config": dict(edition.config),
+                "build_options": list(edition.build_options),
+            }
+            for name, edition in sorted(project.editions.items())
+        },
+    }

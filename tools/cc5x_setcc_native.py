@@ -28,6 +28,7 @@ from cc5x_setcc_native_lib.project import (
     delete_project_edition,
     default_project_manifest,
     load_project_file,
+    project_summary,
     remove_project_edition_config,
     set_project_edition,
     update_project_edition_build_options,
@@ -746,6 +747,76 @@ def cmd_project_set_build_options(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_list_editions(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    if args.json:
+        payload = [
+            {
+                "name": name,
+                "config_count": len(edition.config),
+                "build_option_count": len(edition.build_options),
+            }
+            for name, edition in sorted(project.editions.items())
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
+    for name, edition in sorted(project.editions.items()):
+        print(
+            f"{name}: config={len(edition.config)} build_options={len(edition.build_options)}"
+        )
+    return 0
+
+
+def cmd_project_show(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    if args.json:
+        if args.edition:
+            edition = project.editions.get(args.edition)
+            if edition is None:
+                raise SystemExit(f"unknown edition {args.edition!r} in {project_path}")
+            print(
+                json.dumps(
+                    {
+                        "name": args.edition,
+                        "config": dict(edition.config),
+                        "build_options": list(edition.build_options),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        print(json.dumps(project_summary(project), indent=2))
+        return 0
+    if args.edition:
+        edition = project.editions.get(args.edition)
+        if edition is None:
+            raise SystemExit(f"unknown edition {args.edition!r} in {project_path}")
+        print(f"edition: {args.edition}")
+        print("config:")
+        if edition.config:
+            for name, value in sorted(edition.config.items()):
+                print(f"  {name}={value}")
+        else:
+            print("  (none)")
+        print("build options:")
+        if edition.build_options:
+            for option in edition.build_options:
+                print(f"  {option}")
+        else:
+            print("  (none)")
+        return 0
+    summary = project_summary(project)
+    print(f"project: {project_path}")
+    print(f"device: {summary['device']}")
+    print(f"header: {project.header_mode} -> {project.header_path}")
+    print(f"config source: {project.config_source}")
+    print(f"main source: {project.main_source}")
+    print(f"editions: {', '.join(sorted(project.editions))}")
+    return 0
+
+
 def cmd_list_devices(args: argparse.Namespace) -> int:
     prefixes = tuple(
         f"PIC{family.upper()}" if not family.upper().startswith("PIC") else family.upper()
@@ -881,6 +952,23 @@ def build_parser() -> argparse.ArgumentParser:
     project_set_build_options.add_argument("--edition", required=True)
     project_set_build_options.add_argument("--option", action="append")
     project_set_build_options.set_defaults(func=cmd_project_set_build_options)
+
+    project_list_editions = subparsers.add_parser(
+        "project-list-editions",
+        help="List the editions stored in a setcc-native.json manifest.",
+    )
+    project_list_editions.add_argument("--project", default="setcc-native.json")
+    project_list_editions.add_argument("--json", action="store_true")
+    project_list_editions.set_defaults(func=cmd_project_list_editions)
+
+    project_show = subparsers.add_parser(
+        "project-show",
+        help="Show the stored project manifest or one edition from it.",
+    )
+    project_show.add_argument("--project", default="setcc-native.json")
+    project_show.add_argument("--edition")
+    project_show.add_argument("--json", action="store_true")
+    project_show.set_defaults(func=cmd_project_show)
 
     render_pack = subparsers.add_parser(
         "render-pack-config-section",

@@ -32,6 +32,10 @@ The implementation direction should also consider Microchip technical brief `TB3
   - sets or removes stored config-symbol values for a named edition
 - `project-set-build-options`
   - replaces the stored build option list for a named edition
+- `project-list-editions`
+  - lists the editions stored in the manifest with quick counts
+- `project-show`
+  - prints either the whole stored manifest summary or one edition's details
 - `list-pack-config`
   - lists dynamic config symbols directly from pack metadata
 - `render-pack-config`
@@ -153,6 +157,18 @@ python3 tools/cc5x_setcc_native.py project-set-build-options \
   --edition debug \
   --option=-a \
   --option=-k
+```
+
+List the available editions:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-list-editions
+```
+
+Show one edition's stored state:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-show --edition production
 ```
 
 List config values from the selected device pack instead of from a shipped BKND header:

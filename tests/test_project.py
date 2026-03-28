@@ -9,6 +9,7 @@ from tools.cc5x_setcc_native_lib.project import (
     delete_project_edition,
     default_project_manifest,
     load_project_file,
+    project_summary,
     remove_project_edition_config,
     set_project_edition,
     update_project_edition_build_options,
@@ -115,6 +116,18 @@ class ProjectFileTests(unittest.TestCase):
             ["-a", "-k"],
         )
         self.assertEqual(project.editions["debug"].build_options, ["-a", "-k"])
+
+    def test_project_summary_includes_edition_details(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/compiler/CC5X.EXE",
+            runner="/runner/cc5x-run.sh",
+            main_source="app.c",
+        )
+        project = update_project_edition_config(project, "production", {"FOSC": "INTOSC"})
+        summary = project_summary(project)
+        self.assertEqual(summary["device"], "PIC16F1509")
+        self.assertEqual(summary["editions"]["production"]["config"]["FOSC"], "INTOSC")
 
 
 if __name__ == "__main__":
