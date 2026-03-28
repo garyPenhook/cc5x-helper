@@ -119,6 +119,12 @@ Launch the GUI:
 python3 tools/cc5x_helper_gui.py
 ```
 
+If a Linux desktop session forces an incompatible Qt platform theme, try:
+
+```bash
+QT_QPA_PLATFORM=xcb ./dist/cc5x-helper-gui
+```
+
 List locally discoverable devices:
 
 ```bash

@@ -273,6 +273,12 @@ Launch the PyQt6 GUI:
 python3 tools/cc5x_helper_gui.py
 ```
 
+If a Linux desktop session injects a problematic Qt platform theme, force plain XCB:
+
+```bash
+QT_QPA_PLATFORM=xcb ./dist/cc5x-helper-gui
+```
+
 ## Current Limits
 
 - Header generation is a professional first pass, not full parity with every BKND hand-tuned header.
