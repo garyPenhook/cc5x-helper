@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .packs import normalize_device_name
@@ -149,3 +149,80 @@ def validate_project_file(project: ProjectFile) -> list[str]:
             if not option:
                 errors.append(f"edition {name!r} contains an empty build option")
     return errors
+
+
+def set_project_edition(
+    project: ProjectFile,
+    name: str,
+    *,
+    from_edition: str | None = None,
+) -> ProjectFile:
+    editions = dict(project.editions)
+    if from_edition is not None:
+        source = editions.get(from_edition)
+        if source is None:
+            raise KeyError(from_edition)
+        editions[name] = ProjectEdition(
+            name=name,
+            config=dict(source.config),
+            build_options=list(source.build_options),
+        )
+    else:
+        editions[name] = editions.get(name, ProjectEdition(name=name))
+    return replace(project, editions=editions)
+
+
+def delete_project_edition(project: ProjectFile, name: str) -> ProjectFile:
+    editions = dict(project.editions)
+    if name not in editions:
+        raise KeyError(name)
+    if len(editions) == 1:
+        raise ValueError("cannot delete the last edition")
+    del editions[name]
+    return replace(project, editions=editions)
+
+
+def update_project_edition_config(
+    project: ProjectFile,
+    edition_name: str,
+    updates: dict[str, str],
+    *,
+    clear: bool = False,
+) -> ProjectFile:
+    edition = project.editions.get(edition_name)
+    if edition is None:
+        raise KeyError(edition_name)
+    config = {} if clear else dict(edition.config)
+    config.update(updates)
+    editions = dict(project.editions)
+    editions[edition_name] = replace(edition, config=config)
+    return replace(project, editions=editions)
+
+
+def remove_project_edition_config(
+    project: ProjectFile,
+    edition_name: str,
+    names: list[str],
+) -> ProjectFile:
+    edition = project.editions.get(edition_name)
+    if edition is None:
+        raise KeyError(edition_name)
+    config = dict(edition.config)
+    for name in names:
+        config.pop(name, None)
+    editions = dict(project.editions)
+    editions[edition_name] = replace(edition, config=config)
+    return replace(project, editions=editions)
+
+
+def update_project_edition_build_options(
+    project: ProjectFile,
+    edition_name: str,
+    options: list[str],
+) -> ProjectFile:
+    edition = project.editions.get(edition_name)
+    if edition is None:
+        raise KeyError(edition_name)
+    editions = dict(project.editions)
+    editions[edition_name] = replace(edition, build_options=list(options))
+    return replace(project, editions=editions)

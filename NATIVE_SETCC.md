@@ -26,6 +26,12 @@ The implementation direction should also consider Microchip technical brief `TB3
   - creates an open `setcc-native.json` manifest instead of opaque `setcc.pxk` state
 - `project-validate`
   - validates that manifest before generation or build steps
+- `project-edit-edition`
+  - creates, copies, or deletes named editions in the project manifest
+- `project-set-config`
+  - sets or removes stored config-symbol values for a named edition
+- `project-set-build-options`
+  - replaces the stored build option list for a named edition
 - `list-pack-config`
   - lists dynamic config symbols directly from pack metadata
 - `render-pack-config`
@@ -121,6 +127,32 @@ Validate that manifest:
 
 ```bash
 python3 tools/cc5x_setcc_native.py project-validate
+```
+
+Create a new edition by copying `production`:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-edit-edition \
+  --edition qa \
+  --copy-from production
+```
+
+Store config values in a named edition:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-set-config \
+  --edition production \
+  --set FOSC=INTOSC \
+  --set WDTE=OFF
+```
+
+Store edition-specific build flags:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-set-build-options \
+  --edition debug \
+  --option=-a \
+  --option=-k
 ```
 
 List config values from the selected device pack instead of from a shipped BKND header:
