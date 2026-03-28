@@ -26,6 +26,8 @@ The implementation direction should also consider Microchip technical brief `TB3
   - creates an open `setcc-native.json` manifest instead of opaque `setcc.pxk` state
 - `project-validate`
   - validates that manifest before generation or build steps
+- `project-edit`
+  - updates top-level manifest fields such as device, paths, compiler, runner, and header mode
 - `project-edit-edition`
   - creates, copies, or deletes named editions in the project manifest
 - `project-set-config`
@@ -131,6 +133,17 @@ Validate that manifest:
 
 ```bash
 python3 tools/cc5x_setcc_native.py project-validate
+```
+
+Update top-level manifest fields:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-edit \
+  --device PIC12F1840 \
+  --header-mode existing \
+  --header-path include/12F1840.H \
+  --main-source src/main.c \
+  --config-source src/config.c
 ```
 
 Create a new edition by copying `production`:

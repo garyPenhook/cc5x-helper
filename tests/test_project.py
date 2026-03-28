@@ -12,6 +12,7 @@ from tools.cc5x_setcc_native_lib.project import (
     project_summary,
     remove_project_edition_config,
     set_project_edition,
+    update_project_fields,
     update_project_edition_build_options,
     update_project_edition_config,
     validate_project_file,
@@ -128,6 +129,33 @@ class ProjectFileTests(unittest.TestCase):
         summary = project_summary(project)
         self.assertEqual(summary["device"], "PIC16F1509")
         self.assertEqual(summary["editions"]["production"]["config"]["FOSC"], "INTOSC")
+
+    def test_can_update_top_level_project_fields(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/compiler/CC5X.EXE",
+            runner="/runner/cc5x-run.sh",
+            main_source="app.c",
+        )
+        project = update_project_fields(
+            project,
+            device="12f1840",
+            compiler="/compiler/new-CC5X.EXE",
+            header_mode="existing",
+            header_path="include/12F1840.H",
+            config_source="cfg.c",
+            main_source="src/main.c",
+            clear_runner=True,
+            mplab_root="/opt/microchip/mplabx",
+        )
+        self.assertEqual(project.device, "PIC12F1840")
+        self.assertEqual(project.compiler, "/compiler/new-CC5X.EXE")
+        self.assertIsNone(project.runner)
+        self.assertEqual(project.header_mode, "existing")
+        self.assertEqual(project.header_path, "include/12F1840.H")
+        self.assertEqual(project.config_source, "cfg.c")
+        self.assertEqual(project.main_source, "src/main.c")
+        self.assertEqual(project.mplab_root, "/opt/microchip/mplabx")
 
 
 if __name__ == "__main__":
