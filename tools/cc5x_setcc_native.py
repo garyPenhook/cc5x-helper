@@ -31,6 +31,7 @@ from cc5x_setcc_native_lib.project import (
     project_summary,
     remove_project_edition_config,
     set_project_edition,
+    update_project_fields,
     update_project_edition_build_options,
     update_project_edition_config,
     validate_project_file,
@@ -747,6 +748,32 @@ def cmd_project_set_build_options(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_edit(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    project = update_project_fields(
+        project,
+        device=args.device,
+        compiler=args.compiler,
+        runner=args.runner,
+        mplab_root=args.mplab_root,
+        header_mode=args.header_mode,
+        header_path=args.header_path,
+        config_source=args.config_source,
+        main_source=args.main_source,
+        clear_runner=args.clear_runner,
+        clear_mplab_root=args.clear_mplab_root,
+    )
+    errors = validate_project_file(project)
+    if errors:
+        raise SystemExit(
+            f"invalid project update for {project_path}:\n- " + "\n- ".join(errors)
+        )
+    write_project_file(project, project_path)
+    print(f"updated project fields in {project_path}")
+    return 0
+
+
 def cmd_project_list_editions(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
@@ -922,6 +949,23 @@ def build_parser() -> argparse.ArgumentParser:
     project_validate.add_argument("--project", default="setcc-native.json")
     project_validate.add_argument("--json", action="store_true")
     project_validate.set_defaults(func=cmd_project_validate)
+
+    project_edit = subparsers.add_parser(
+        "project-edit",
+        help="Update top-level fields in a setcc-native.json manifest.",
+    )
+    project_edit.add_argument("--project", default="setcc-native.json")
+    project_edit.add_argument("--device")
+    project_edit.add_argument("--compiler")
+    project_edit.add_argument("--runner")
+    project_edit.add_argument("--clear-runner", action="store_true")
+    project_edit.add_argument("--mplab-root")
+    project_edit.add_argument("--clear-mplab-root", action="store_true")
+    project_edit.add_argument("--header-mode", choices=["generated", "supplied", "existing"])
+    project_edit.add_argument("--header-path")
+    project_edit.add_argument("--config-source")
+    project_edit.add_argument("--main-source")
+    project_edit.set_defaults(func=cmd_project_edit)
 
     project_edit_edition = subparsers.add_parser(
         "project-edit-edition",

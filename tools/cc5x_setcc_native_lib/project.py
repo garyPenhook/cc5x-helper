@@ -250,3 +250,30 @@ def project_summary(project: ProjectFile) -> dict[str, object]:
             for name, edition in sorted(project.editions.items())
         },
     }
+
+
+def update_project_fields(
+    project: ProjectFile,
+    *,
+    device: str | None = None,
+    compiler: str | None = None,
+    runner: str | None = None,
+    mplab_root: str | None = None,
+    header_mode: str | None = None,
+    header_path: str | None = None,
+    config_source: str | None = None,
+    main_source: str | None = None,
+    clear_runner: bool = False,
+    clear_mplab_root: bool = False,
+) -> ProjectFile:
+    return replace(
+        project,
+        device=normalize_device_name(device) if device is not None else project.device,
+        compiler=compiler if compiler is not None else project.compiler,
+        runner=None if clear_runner else (runner if runner is not None else project.runner),
+        mplab_root=None if clear_mplab_root else (mplab_root if mplab_root is not None else project.mplab_root),
+        header_mode=header_mode if header_mode is not None else project.header_mode,
+        header_path=header_path if header_path is not None else project.header_path,
+        config_source=config_source if config_source is not None else project.config_source,
+        main_source=main_source if main_source is not None else project.main_source,
+    )
