@@ -55,6 +55,8 @@ The implementation direction should also consider Microchip technical brief `TB3
 - `tools/validate_generated_headers.py`
   - generates headers from pack metadata and compiles them with real `CC5X.EXE`
   - compares generated and shipped-header control cases for selected devices
+- `tools/build_linux_executable.sh`
+  - packages the CLI as a Linux executable with `uv` and PyInstaller
 
 ## Why This Is A Better Direction
 
@@ -231,6 +233,22 @@ python3 tools/cc5x_setcc_native.py build \
   --project setcc-native.json \
   --edition production \
   --dry-run
+```
+
+Build a single-file Linux executable with `uv` and PyInstaller:
+
+```bash
+bash tools/build_linux_executable.sh
+```
+
+Direct `uv` packaging command:
+
+```bash
+uv run --python 3.13 --with pyinstaller pyinstaller \
+  --onefile \
+  --name cc5x-helper \
+  --paths tools \
+  tools/cc5x_setcc_native.py
 ```
 
 ## Current Limits

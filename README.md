@@ -48,6 +48,14 @@ Core commands:
 - `describe-device`
 - `list-devices`
 - `doctor`
+- `project-init`
+- `project-validate`
+- `project-edit`
+- `project-edit-edition`
+- `project-set-config`
+- `project-set-build-options`
+- `project-list-editions`
+- `project-show`
 - `list-pack-config`
 - `render-pack-config`
 - `render-pack-header`
@@ -55,8 +63,6 @@ Core commands:
 - `render-config`
 - `sync-config`
 - `build`
-- `project-init`
-- `project-validate`
 
 Library modules:
 
@@ -169,6 +175,42 @@ Build from the manifest:
 python3 tools/cc5x_setcc_native.py build \
   --project setcc-native.json \
   --edition production
+```
+
+Inspect and edit the manifest from the CLI:
+
+```bash
+python3 tools/cc5x_setcc_native.py project-list-editions
+python3 tools/cc5x_setcc_native.py project-show --edition production
+python3 tools/cc5x_setcc_native.py project-edit \
+  --header-mode existing \
+  --header-path include/16F1509.H
+```
+
+## Linux Executable
+
+This repo can be packaged into a single-file Linux executable with `uv` and PyInstaller, using the active Python 3.13 toolchain on this machine.
+
+Build it:
+
+```bash
+bash tools/build_linux_executable.sh
+```
+
+The resulting binary is written to:
+
+```bash
+dist/cc5x-helper
+```
+
+Equivalent direct command:
+
+```bash
+uv run --python 3.13 --with pyinstaller pyinstaller \
+  --onefile \
+  --name cc5x-helper \
+  --paths tools \
+  tools/cc5x_setcc_native.py
 ```
 
 ## Validation
