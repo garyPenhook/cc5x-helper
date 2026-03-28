@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 from argparse import Namespace
+from functools import wraps
 from pathlib import Path
 
 if sys.platform.startswith("linux"):
@@ -134,6 +135,20 @@ def parse_multiline_options(text: str) -> list[str]:
     return options
 
 
+def gui_action(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except SystemExit as exc:
+            self.show_error(str(exc) or method.__name__)
+        except Exception as exc:
+            self.show_error(f"{type(exc).__name__}: {exc}")
+        return None
+
+    return wrapped
+
+
 class OutputPane(QPlainTextEdit):
     def __init__(self) -> None:
         super().__init__()
@@ -197,14 +212,20 @@ class DeviceTab(QWidget):
         )
         return result, metadata
 
+    def show_error(self, message: str) -> None:
+        QMessageBox.critical(self, "cc5x-helper", message)
+
+    @gui_action
     def run_probe(self) -> None:
         result = find_device_metadata(self._device(), self._mplab_root())
         self.output.write_text(format_json(result))
 
+    @gui_action
     def run_describe(self) -> None:
         _, metadata = self._metadata()
         self.output.write_text(metadata.to_json())
 
+    @gui_action
     def run_list_pack_config(self) -> None:
         _, metadata = self._metadata()
         payload = {
@@ -213,10 +234,12 @@ class DeviceTab(QWidget):
         }
         self.output.write_text(format_json(payload))
 
+    @gui_action
     def run_render_header(self) -> None:
         _, metadata = self._metadata()
         self.output.write_text(render_full_header(metadata))
 
+    @gui_action
     def run_render_config(self) -> None:
         _, metadata = self._metadata()
         symbols = pack_config_symbols(metadata)
@@ -255,9 +278,14 @@ class EnvironmentTab(QWidget):
         self.output = OutputPane()
         layout.addWidget(self.output, 1)
 
+    def show_error(self, message: str) -> None:
+        QMessageBox.critical(self, "cc5x-helper", message)
+
+    @gui_action
     def show_doctor(self) -> None:
         self.output.write_text(format_json(environment_report()))
 
+    @gui_action
     def show_devices(self) -> None:
         family = self.family_combo.currentText()
         prefixes = () if family == "All" else (family,)
@@ -406,12 +434,24 @@ class ProjectTab(QWidget):
     def project_path(self) -> Path:
         return Path(self.project_path_edit.text().strip())
 
+    def require_project_path(self) -> Path:
+        path = self.project_path()
+        if not path.exists():
+            raise SystemExit(
+                f"project file not found: {path}\nUse New to create one or Browse to open an existing manifest."
+            )
+        return path
+
+    def show_error(self, message: str) -> None:
+        QMessageBox.critical(self, "cc5x-helper", message)
+
     def current_edition(self) -> str:
         item = self.edition_list.currentItem()
         if item is None:
             raise SystemExit("no edition selected")
         return item.text()
 
+    @gui_action
     def browse_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -423,6 +463,7 @@ class ProjectTab(QWidget):
             self.project_path_edit.setText(path)
             self.load_project()
 
+    @gui_action
     def new_project(self) -> None:
         project_path = self.project_path()
         project = default_project_manifest(
@@ -440,8 +481,9 @@ class ProjectTab(QWidget):
         self.load_project()
         self.output.write_text(f"created {project_path}")
 
+    @gui_action
     def load_project(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         self.device_edit.setText(project.device)
         self.compiler_edit.setText(project.compiler)
         self.runner_edit.setText(project.runner or "")
@@ -457,8 +499,9 @@ class ProjectTab(QWidget):
             self.edition_list.setCurrentRow(0)
         self.output.write_text(format_json(project_summary(project)))
 
+    @gui_action
     def save_project_fields(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         project = update_project_fields(
             project,
             device=self.device_edit.text().strip(),
@@ -478,62 +521,70 @@ class ProjectTab(QWidget):
         write_project_file(project, self.project_path())
         self.load_project()
 
+    @gui_action
     def add_edition(self) -> None:
         name = self.new_edition_edit.text().strip()
         if not name:
             raise SystemExit("edition name is required")
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         source_name = self.edition_list.currentItem().text() if self.edition_list.currentItem() else None
         project = set_project_edition(project, name, from_edition=source_name)
         write_project_file(project, self.project_path())
         self.new_edition_edit.clear()
         self.load_project()
 
+    @gui_action
     def delete_edition(self) -> None:
         name = self.current_edition()
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         project = delete_project_edition(project, name)
         write_project_file(project, self.project_path())
         self.load_project()
 
+    @gui_action
     def load_selected_edition(self, name: str) -> None:
         if not name:
             return
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         edition = project.editions[name]
         self.config_edit.setPlainText(
             "\n".join(f"{key}={value}" for key, value in sorted(edition.config.items()))
         )
         self.build_options_edit.setPlainText("\n".join(edition.build_options))
 
+    @gui_action
     def save_edition_config(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         updates = parse_multiline_pairs(self.config_edit.toPlainText())
         project = update_project_edition_config(project, self.current_edition(), updates, clear=True)
         write_project_file(project, self.project_path())
         self.output.write_text(f"updated config for {self.current_edition()}")
 
+    @gui_action
     def clear_edition_config(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         names = list(project.editions[self.current_edition()].config)
         project = remove_project_edition_config(project, self.current_edition(), names)
         write_project_file(project, self.project_path())
         self.config_edit.clear()
         self.output.write_text(f"cleared config for {self.current_edition()}")
 
+    @gui_action
     def save_build_options(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         options = parse_multiline_options(self.build_options_edit.toPlainText())
         project = update_project_edition_build_options(project, self.current_edition(), options)
         write_project_file(project, self.project_path())
         self.output.write_text(f"updated build options for {self.current_edition()}")
 
+    @gui_action
     def show_project_summary(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         self.output.write_text(format_json(project_summary(project)))
 
+    @gui_action
     def show_editions(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         payload = [
             {
                 "name": name,
@@ -544,8 +595,9 @@ class ProjectTab(QWidget):
         ]
         self.output.write_text(format_json(payload))
 
+    @gui_action
     def show_selected_edition(self) -> None:
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         edition = project.editions[self.current_edition()]
         self.output.write_text(
             format_json(
@@ -558,15 +610,17 @@ class ProjectTab(QWidget):
         )
 
     def _project_and_metadata(self):
-        project = load_project_file(self.project_path())
+        project = load_project_file(self.require_project_path())
         _, metadata = project_metadata(project)
         return project, metadata
 
+    @gui_action
     def render_header(self) -> None:
         project, _ = self._project_and_metadata()
         header_path = ensure_project_header(self.project_path(), project)
         self.output.write_text(header_path.read_text(encoding="latin-1"))
 
+    @gui_action
     def render_config(self) -> None:
         project_path, project, edition = load_project_and_edition(str(self.project_path()), self.current_edition())
         _, metadata = project_metadata(project)
@@ -582,6 +636,7 @@ class ProjectTab(QWidget):
             )
         )
 
+    @gui_action
     def sync_config(self) -> None:
         project_path, project, edition = load_project_and_edition(str(self.project_path()), self.current_edition())
         _, metadata = project_metadata(project)
@@ -602,9 +657,11 @@ class ProjectTab(QWidget):
             f"{'updated' if replaced else 'appended'} managed config block in {source_path}"
         )
 
+    @gui_action
     def build_dry_run(self) -> None:
         self._run_build(dry_run=True)
 
+    @gui_action
     def build_project(self) -> None:
         self._run_build(dry_run=False)
 
