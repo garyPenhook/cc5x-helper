@@ -273,6 +273,20 @@ Launch the PyQt6 GUI:
 python3 tools/cc5x_helper_gui.py
 ```
 
+The GUI now includes a built-in help system for new users:
+
+- `Help -> Help Contents` or `F1`
+- `Help -> Help For Current Tab` or `Shift+F1`
+- per-tab `Help` buttons for `Environment`, `Devices`, and `Projects`
+
+The help viewer covers:
+
+- first-run environment setup
+- device inspection workflows
+- project manifest editing
+- editions, config syncing, and builds
+- header modes and troubleshooting
+
 If a Linux desktop session injects a problematic Qt platform theme, force plain XCB:
 
 ```bash

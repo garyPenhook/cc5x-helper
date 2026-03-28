@@ -27,6 +27,7 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -69,6 +70,7 @@ try:
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
     from cc5x_setcc_native_lib.project import (
         default_project_manifest,
+        delete_project_edition,
         load_project_file,
         project_summary,
         remove_project_edition_config,
@@ -102,6 +104,7 @@ except ModuleNotFoundError:
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
     from tools.cc5x_setcc_native_lib.project import (
         default_project_manifest,
+        delete_project_edition,
         load_project_file,
         project_summary,
         remove_project_edition_config,
@@ -155,6 +158,216 @@ def default_project_path() -> Path:
         if candidate.is_file():
             return candidate
     return candidates[0]
+
+
+def help_sections() -> list[tuple[str, str]]:
+    return [
+        (
+            "Welcome",
+            """
+            <h1>cc5x-helper GUI Help</h1>
+            <p>This GUI is a front end for the pack-first CC5X helper workflow. It targets BKND CC5X projects for PIC10F, PIC12F, and PIC16F devices, using modern Microchip device packs where possible.</p>
+            <h2>What the app does</h2>
+            <ul>
+              <li>Checks your environment and installed device packs.</li>
+              <li>Inspects device metadata directly from Microchip packs.</li>
+              <li>Generates CC5X-style headers and managed <code>#pragma config</code> blocks.</li>
+              <li>Creates and edits a project manifest named <code>setcc-native.json</code>.</li>
+              <li>Builds projects through CC5X, optionally through CrossOver or Wine.</li>
+            </ul>
+            <h2>Where to start</h2>
+            <ol>
+              <li>Open <b>Environment</b> and run <b>Doctor</b>.</li>
+              <li>Open <b>Devices</b> and probe your target part.</li>
+              <li>Open <b>Projects</b>, create a new manifest, then add at least one edition.</li>
+              <li>Use <b>Sync Config</b> before a real build if your source file should contain a managed config block.</li>
+              <li>Use <b>Dry Run Build</b> first, then <b>Build</b>.</li>
+            </ol>
+            <h2>Manifest location</h2>
+            <p>The default manifest file is <code>setcc-native.json</code>. The GUI tries to find it in sensible places, including the project root above <code>dist/</code>. You can also force a manifest path with the <code>CC5X_HELPER_PROJECT</code> environment variable.</p>
+            """,
+        ),
+        (
+            "Environment",
+            """
+            <h1>Environment Tab</h1>
+            <p>This tab answers a simple question: is this machine ready to use cc5x-helper?</p>
+            <h2>Controls</h2>
+            <ul>
+              <li><b>Family</b>: filters the device inventory to PIC10F, PIC12F, PIC16F, or all supported families.</li>
+              <li><b>Doctor</b>: shows a readiness report. Use this first on a new machine.</li>
+              <li><b>List Devices</b>: lists locally discoverable devices from installed Microchip packs.</li>
+            </ul>
+            <h2>How to read Doctor output</h2>
+            <ul>
+              <li>Pack availability tells you whether the machine has source metadata for supported devices.</li>
+              <li>Compiler and runner paths tell you whether the configured CC5X toolchain exists.</li>
+              <li>Validated devices indicate which parts have already passed the real compiler-validation flow in this repo.</li>
+            </ul>
+            <h2>When to use this tab</h2>
+            <ul>
+              <li>First run on a new machine.</li>
+              <li>After installing or moving Microchip device packs.</li>
+              <li>After changing your CrossOver, Wine, or CC5X installation.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Devices",
+            """
+            <h1>Devices Tab</h1>
+            <p>This tab is for raw device exploration without needing a project manifest.</p>
+            <h2>Fields</h2>
+            <ul>
+              <li><b>Device</b>: the target part, for example <code>PIC16F1509</code>.</li>
+              <li><b>MPLAB Root</b>: optional override for older MPLAB metadata locations. Leave it blank unless you have a specific legacy install to use.</li>
+            </ul>
+            <h2>Actions</h2>
+            <ul>
+              <li><b>Probe</b>: shows where metadata for the device was found, such as pack files, <code>.PIC</code>, <code>.ini</code>, and <code>cfgdata</code>.</li>
+              <li><b>Describe</b>: shows normalized device metadata parsed from those sources.</li>
+              <li><b>List Config</b>: lists available config symbols and their legal values.</li>
+              <li><b>Render Header</b>: generates a CC5X-style header from pack metadata.</li>
+              <li><b>Render Config</b>: generates a managed config block using default symbol values.</li>
+            </ul>
+            <h2>Typical use</h2>
+            <ol>
+              <li>Enter the device name.</li>
+              <li>Run <b>Probe</b> to confirm the device is actually available locally.</li>
+              <li>Run <b>Describe</b> to inspect parsed metadata.</li>
+              <li>Run <b>List Config</b> before deciding per-edition config values.</li>
+              <li>Run <b>Render Header</b> or <b>Render Config</b> when you need ad hoc output.</li>
+            </ol>
+            <h2>What this tab does not do</h2>
+            <p>It does not save project state. Use the <b>Projects</b> tab for repeatable builds and edition management.</p>
+            """,
+        ),
+        (
+            "Projects",
+            """
+            <h1>Projects Tab</h1>
+            <p>This is the main working area for repeatable builds. It manages a JSON manifest, edition-specific config values, build options, header generation, and actual builds.</p>
+            <h2>Project area</h2>
+            <ul>
+              <li><b>Project</b>: path to <code>setcc-native.json</code>.</li>
+              <li><b>Browse</b>: opens an existing manifest.</li>
+              <li><b>New</b>: creates a new manifest at the current path using the visible project fields.</li>
+              <li><b>Load</b>: loads the selected manifest into the editor.</li>
+            </ul>
+            <h2>Project fields</h2>
+            <ul>
+              <li><b>Device</b>: target MCU, such as <code>PIC12F1840</code> or <code>PIC16F15313</code>.</li>
+              <li><b>Compiler</b>: CC5X executable path.</li>
+              <li><b>Runner</b>: optional wrapper command, such as CrossOver or Wine.</li>
+              <li><b>MPLAB Root</b>: optional legacy metadata override.</li>
+              <li><b>Header Mode</b>: <code>generated</code>, <code>supplied</code>, or <code>existing</code>.</li>
+              <li><b>Header Path</b>: path used for the selected header mode.</li>
+              <li><b>Main Source</b>: source file passed to the compiler.</li>
+              <li><b>Config Source</b>: source file that will receive the managed config block.</li>
+            </ul>
+            <h2>Editions</h2>
+            <p>An edition is a named variant of the same project. Typical examples are <code>production</code>, <code>debug</code>, and <code>qa</code>.</p>
+            <ul>
+              <li><b>Add</b>: creates a new edition. If another edition is selected, the new one copies that edition.</li>
+              <li><b>Delete</b>: removes the selected edition.</li>
+              <li><b>Edition Config</b>: one <code>NAME=VALUE</code> pair per line. Example: <code>FOSC=INTOSC</code>.</li>
+              <li><b>Edition Build Options</b>: one compiler option per line. Example: <code>-a</code>.</li>
+            </ul>
+            <h2>Actions</h2>
+            <ul>
+              <li><b>Save Project</b>: validates and writes the project fields back to the manifest.</li>
+              <li><b>Show Summary</b>: prints a normalized summary of the manifest.</li>
+              <li><b>Show Edition</b>: shows the current edition's config and build options.</li>
+              <li><b>List Editions</b>: lists all editions with counts.</li>
+              <li><b>Sync Config</b>: writes or updates the managed config block in the configured source file.</li>
+              <li><b>Dry Run Build</b>: shows the exact build command without executing it.</li>
+              <li><b>Build</b>: starts an actual compiler run with live output.</li>
+              <li><b>Render Header</b>: generates or resolves the header and shows its text.</li>
+              <li><b>Render Config</b>: previews the config block for the selected edition.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Header Modes",
+            """
+            <h1>Header Modes</h1>
+            <ul>
+              <li><b>generated</b>: preferred for pack-first workflows. The tool generates the header from Microchip pack metadata.</li>
+              <li><b>supplied</b>: use a specific header file path supplied by the project manifest.</li>
+              <li><b>existing</b>: use an already-existing header path directly, without generation.</li>
+            </ul>
+            <h2>When to use each mode</h2>
+            <ul>
+              <li>Use <b>generated</b> for newer devices or when BKND did not ship a header.</li>
+              <li>Use <b>supplied</b> when you want to keep a generated header under version control at a specific path.</li>
+              <li>Use <b>existing</b> when you already maintain the header yourself.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Config Workflow",
+            """
+            <h1>Managed Config Workflow</h1>
+            <p>cc5x-helper treats configuration as generated content derived from device metadata and edition-level overrides.</p>
+            <h2>Recommended flow</h2>
+            <ol>
+              <li>Use the <b>Devices</b> tab to inspect available config symbols.</li>
+              <li>Create or load a project manifest.</li>
+              <li>Add at least one edition.</li>
+              <li>Enter edition config values as <code>NAME=VALUE</code> pairs.</li>
+              <li>Preview with <b>Render Config</b>.</li>
+              <li>Write the managed block with <b>Sync Config</b>.</li>
+            </ol>
+            <h2>Important behavior</h2>
+            <ul>
+              <li><b>Render Config</b> is preview only.</li>
+              <li><b>Sync Config</b> modifies the configured source file.</li>
+              <li>The tool merges pack defaults with edition overrides, with the edition winning.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Build Workflow",
+            """
+            <h1>Build Workflow</h1>
+            <h2>What Build does</h2>
+            <ul>
+              <li>Loads the manifest and selected edition.</li>
+              <li>Ensures the required header is available.</li>
+              <li>Builds the CC5X command line using the project device, include path, base options, and edition options.</li>
+              <li>Runs the command directly or through the configured runner.</li>
+              <li>Streams compiler output into the right-hand output pane.</li>
+            </ul>
+            <h2>Recommended sequence</h2>
+            <ol>
+              <li>Save the project.</li>
+              <li>Render or sync config if needed.</li>
+              <li>Use <b>Dry Run Build</b> to inspect the command line.</li>
+              <li>Use <b>Build</b> for a real compile.</li>
+            </ol>
+            <h2>One active build at a time</h2>
+            <p>The GUI prevents launching another build while one is already running.</p>
+            """,
+        ),
+        (
+            "Troubleshooting",
+            """
+            <h1>Troubleshooting</h1>
+            <h2>Common issues</h2>
+            <ul>
+              <li><b>project file not found</b>: use <b>New</b> to create a manifest or <b>Browse</b> to select an existing one.</li>
+              <li><b>no edition selected</b>: create an edition and select it before edition-specific actions.</li>
+              <li><b>device metadata not found</b>: verify the device exists in installed packs, then run <b>Doctor</b> and <b>Probe</b>.</li>
+              <li><b>build fails immediately</b>: check the compiler path, runner path, and build command via <b>Dry Run Build</b>.</li>
+              <li><b>packaged GUI launched from dist</b>: the GUI now prefers the project root above <code>dist/</code>, but you can also set <code>CC5X_HELPER_PROJECT</code> explicitly.</li>
+            </ul>
+            <h2>Error handling</h2>
+            <p>The GUI wraps button actions and application-level exceptions. Normal user errors should appear as dialogs instead of crashing the process.</p>
+            <h2>When to inspect raw output</h2>
+            <p>Use the output pane whenever a command succeeds but the result is not what you expected. The app shows raw JSON, header text, config blocks, and compiler output there.</p>
+            """,
+        ),
+    ]
 
 
 def parse_multiline_pairs(text: str) -> dict[str, str]:
@@ -275,9 +488,36 @@ class OutputPane(QPlainTextEdit):
         self.ensureCursorVisible()
 
 
+class HelpDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("cc5x-helper Help")
+        self.resize(1000, 760)
+
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        for title, html in help_sections():
+            page = QTextEdit()
+            page.setReadOnly(True)
+            page.setHtml(html)
+            tabs.addTab(page, title)
+        layout.addWidget(tabs)
+        self.tabs = tabs
+
+    def show_section(self, title: str) -> None:
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == title:
+                self.tabs.setCurrentIndex(index)
+                break
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+
 class DeviceTab(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, open_help=None) -> None:
         super().__init__()
+        self.open_help = open_help
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -298,6 +538,9 @@ class DeviceTab(QWidget):
             button = QPushButton(label)
             button.clicked.connect(handler)
             button_row.addWidget(button)
+        help_button = QPushButton("Help")
+        help_button.clicked.connect(self.show_help)
+        button_row.addWidget(help_button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
@@ -323,6 +566,11 @@ class DeviceTab(QWidget):
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "cc5x-helper", message)
+
+    @gui_action
+    def show_help(self) -> None:
+        if self.open_help is not None:
+            self.open_help("Devices")
 
     @gui_action
     def run_probe(self) -> None:
@@ -364,8 +612,9 @@ class DeviceTab(QWidget):
 
 
 class EnvironmentTab(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, open_help=None) -> None:
         super().__init__()
+        self.open_help = open_help
         layout = QVBoxLayout(self)
 
         controls = QHBoxLayout()
@@ -381,6 +630,9 @@ class EnvironmentTab(QWidget):
         list_button = QPushButton("List Devices")
         list_button.clicked.connect(self.show_devices)
         controls.addWidget(list_button)
+        help_button = QPushButton("Help")
+        help_button.clicked.connect(self.show_help)
+        controls.addWidget(help_button)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -389,6 +641,11 @@ class EnvironmentTab(QWidget):
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "cc5x-helper", message)
+
+    @gui_action
+    def show_help(self) -> None:
+        if self.open_help is not None:
+            self.open_help("Environment")
 
     @gui_action
     def show_doctor(self) -> None:
@@ -402,8 +659,9 @@ class EnvironmentTab(QWidget):
 
 
 class ProjectTab(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, open_help=None) -> None:
         super().__init__()
+        self.open_help = open_help
         self.process: QProcess | None = None
 
         root_layout = QVBoxLayout(self)
@@ -420,6 +678,9 @@ class ProjectTab(QWidget):
         load_button = QPushButton("Load")
         load_button.clicked.connect(self.load_project)
         path_row.addWidget(load_button)
+        help_button = QPushButton("Help")
+        help_button.clicked.connect(self.show_help)
+        path_row.addWidget(help_button)
         root_layout.addLayout(path_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -553,6 +814,11 @@ class ProjectTab(QWidget):
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "cc5x-helper", message)
+
+    @gui_action
+    def show_help(self) -> None:
+        if self.open_help is not None:
+            self.open_help("Projects")
 
     def current_edition(self) -> str:
         item = self.edition_list.currentItem()
@@ -813,6 +1079,7 @@ class ProjectTab(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.help_dialog: HelpDialog | None = None
         self.setWindowTitle("cc5x-helper")
         self.resize(1400, 880)
         self.setStyleSheet(
@@ -851,15 +1118,38 @@ class MainWindow(QMainWindow):
             """
         )
 
-        tabs = QTabWidget()
-        tabs.addTab(EnvironmentTab(), "Environment")
-        tabs.addTab(DeviceTab(), "Devices")
-        tabs.addTab(ProjectTab(), "Projects")
-        self.setCentralWidget(tabs)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(EnvironmentTab(self.show_help_section), "Environment")
+        self.tabs.addTab(DeviceTab(self.show_help_section), "Devices")
+        self.tabs.addTab(ProjectTab(self.show_help_section), "Projects")
+        self.setCentralWidget(self.tabs)
 
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
-        self.menuBar().addAction(quit_action)
+        help_action = QAction("Help Contents", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self.show_help)
+        current_help_action = QAction("Help For Current Tab", self)
+        current_help_action.setShortcut("Shift+F1")
+        current_help_action.triggered.connect(self.show_current_tab_help)
+
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("File")
+        file_menu.addAction(quit_action)
+        help_menu = menu_bar.addMenu("Help")
+        help_menu.addAction(help_action)
+        help_menu.addAction(current_help_action)
+
+    def show_help(self) -> None:
+        self.show_help_section("Welcome")
+
+    def show_current_tab_help(self) -> None:
+        self.show_help_section(self.tabs.tabText(self.tabs.currentIndex()))
+
+    def show_help_section(self, title: str) -> None:
+        if self.help_dialog is None:
+            self.help_dialog = HelpDialog(self)
+        self.help_dialog.show_section(title)
 
 
 def main() -> int:

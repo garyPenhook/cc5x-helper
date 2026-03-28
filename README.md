@@ -119,6 +119,12 @@ Launch the GUI:
 python3 tools/cc5x_helper_gui.py
 ```
 
+Inside the GUI:
+
+- Use `Help -> Help Contents` or `F1` for the full new-user help system.
+- Use `Help -> Help For Current Tab` or `Shift+F1` for context help.
+- Each main tab also has its own `Help` button.
+
 If a Linux desktop session forces an incompatible Qt platform theme, try:
 
 ```bash
@@ -199,6 +205,15 @@ The GUI exposes the same workflow in three tabs:
   - probe and describe one device, list config symbols, render headers and config blocks
 - `Projects`
   - create/load manifests, edit top-level project fields, manage editions, sync config, and launch builds
+
+The GUI also includes a built-in help system covering:
+
+- first-run setup
+- every major field and action in each tab
+- header modes
+- config workflow
+- build workflow
+- common failure modes and recovery steps
 
 Inspect and edit the manifest from the CLI:
 
