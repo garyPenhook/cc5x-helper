@@ -206,21 +206,28 @@ python3 tools/cc5x_setcc_native.py project-edit \
 
 ## Linux Executable
 
-This repo can be packaged into a single-file Linux executable with `uv` and PyInstaller, using the active Python 3.13 toolchain on this machine.
+This repo can be packaged into single-file Linux executables with `uv` and PyInstaller, using the active Python 3.13 toolchain on this machine.
 
-Build it:
+Build the CLI:
 
 ```bash
 bash tools/build_linux_executable.sh
 ```
 
-The resulting binary is written to:
+Build the GUI:
+
+```bash
+bash tools/build_linux_executable.sh gui
+```
+
+The resulting binaries are written to:
 
 ```bash
 dist/cc5x-helper
+dist/cc5x-helper-gui
 ```
 
-Equivalent direct command:
+Equivalent direct commands:
 
 ```bash
 uv run --python 3.13 --with pyinstaller pyinstaller \
@@ -228,6 +235,12 @@ uv run --python 3.13 --with pyinstaller pyinstaller \
   --name cc5x-helper \
   --paths tools \
   tools/cc5x_setcc_native.py
+
+uv run --python 3.13 --with pyinstaller pyinstaller \
+  --onefile \
+  --name cc5x-helper-gui \
+  --paths tools \
+  tools/cc5x_helper_gui.py
 ```
 
 ## Validation

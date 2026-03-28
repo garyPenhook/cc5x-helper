@@ -58,7 +58,7 @@ The implementation direction should also consider Microchip technical brief `TB3
   - generates headers from pack metadata and compiles them with real `CC5X.EXE`
   - compares generated and shipped-header control cases for selected devices
 - `tools/build_linux_executable.sh`
-  - packages the CLI as a Linux executable with `uv` and PyInstaller
+  - packages either the CLI or the PyQt6 GUI as a Linux executable with `uv` and PyInstaller
 - `tools/cc5x_helper_gui.py`
   - provides a PyQt6 desktop GUI over the same device, project, config, and build workflows
 
@@ -239,10 +239,16 @@ python3 tools/cc5x_setcc_native.py build \
   --dry-run
 ```
 
-Build a single-file Linux executable with `uv` and PyInstaller:
+Build the CLI as a single-file Linux executable with `uv` and PyInstaller:
 
 ```bash
 bash tools/build_linux_executable.sh
+```
+
+Build the GUI variant:
+
+```bash
+bash tools/build_linux_executable.sh gui
 ```
 
 Direct `uv` packaging command:
@@ -253,6 +259,12 @@ uv run --python 3.13 --with pyinstaller pyinstaller \
   --name cc5x-helper \
   --paths tools \
   tools/cc5x_setcc_native.py
+
+uv run --python 3.13 --with pyinstaller pyinstaller \
+  --onefile \
+  --name cc5x-helper-gui \
+  --paths tools \
+  tools/cc5x_helper_gui.py
 ```
 
 Launch the PyQt6 GUI:
