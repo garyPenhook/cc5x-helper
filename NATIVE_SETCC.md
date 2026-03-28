@@ -278,13 +278,20 @@ The GUI now includes a built-in help system for new users:
 - `Help -> Help Contents` or `F1`
 - `Help -> Help For Current Tab` or `Shift+F1`
 - per-tab `Help` buttons for `Environment`, `Devices`, and `Projects`
+- a persistent `Help` tab inside the main window
 
 The help viewer covers:
 
 - first-run environment setup
+- quick start workflow
+- core concepts and manifest model
 - device inspection workflows
 - project manifest editing
+- project field reference
 - editions, config syncing, and builds
+- output interpretation
+- packaging and runtime behavior
+- CLI relationship
 - header modes and troubleshooting
 
 If a Linux desktop session injects a problematic Qt platform theme, force plain XCB:

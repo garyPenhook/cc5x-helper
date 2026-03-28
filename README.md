@@ -124,6 +124,7 @@ Inside the GUI:
 - Use `Help -> Help Contents` or `F1` for the full new-user help system.
 - Use `Help -> Help For Current Tab` or `Shift+F1` for context help.
 - Each main tab also has its own `Help` button.
+- The main window also includes a dedicated `Help` tab for a persistent in-app manual.
 
 If a Linux desktop session forces an incompatible Qt platform theme, try:
 
@@ -209,10 +210,16 @@ The GUI exposes the same workflow in three tabs:
 The GUI also includes a built-in help system covering:
 
 - first-run setup
+- step-by-step quick start
+- core concepts and workflow model
 - every major field and action in each tab
+- project fields and edition semantics
 - header modes
 - config workflow
 - build workflow
+- output interpretation
+- packaging and runtime notes
+- CLI relationship
 - common failure modes and recovery steps
 
 Inspect and edit the manifest from the CLI:

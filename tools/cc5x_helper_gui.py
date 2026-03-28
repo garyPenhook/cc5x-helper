@@ -160,6 +160,15 @@ def default_project_path() -> Path:
     return candidates[0]
 
 
+HELP_SECTION_ALIASES = {
+    "Projects": "Projects Overview",
+}
+
+
+def normalize_help_title(title: str) -> str:
+    return HELP_SECTION_ALIASES.get(title, title)
+
+
 def help_sections() -> list[tuple[str, str]]:
     return [
         (
@@ -185,6 +194,67 @@ def help_sections() -> list[tuple[str, str]]:
             </ol>
             <h2>Manifest location</h2>
             <p>The default manifest file is <code>setcc-native.json</code>. The GUI tries to find it in sensible places, including the project root above <code>dist/</code>. You can also force a manifest path with the <code>CC5X_HELPER_PROJECT</code> environment variable.</p>
+            """,
+        ),
+        (
+            "Quick Start",
+            """
+            <h1>Quick Start</h1>
+            <p>This is the shortest reliable path from a fresh install to a successful build.</p>
+            <h2>1. Confirm the machine is ready</h2>
+            <ol>
+              <li>Open the <b>Environment</b> tab.</li>
+              <li>Click <b>Doctor</b>.</li>
+              <li>Confirm that pack metadata is visible and that the compiler and runner paths are correct.</li>
+            </ol>
+            <h2>2. Confirm your device exists</h2>
+            <ol>
+              <li>Open the <b>Devices</b> tab.</li>
+              <li>Enter your target MCU, for example <code>PIC16F1509</code>.</li>
+              <li>Click <b>Probe</b>.</li>
+              <li>If probing fails, stop there and fix device metadata first.</li>
+            </ol>
+            <h2>3. Create a project</h2>
+            <ol>
+              <li>Open the <b>Projects</b> tab.</li>
+              <li>Set the manifest path, usually <code>setcc-native.json</code> in your project root.</li>
+              <li>Fill in the project fields.</li>
+              <li>Click <b>New</b>.</li>
+            </ol>
+            <h2>4. Add an edition</h2>
+            <ol>
+              <li>Type an edition name such as <code>production</code> or <code>debug</code>.</li>
+              <li>Click <b>Add</b>.</li>
+              <li>Enter edition config lines like <code>FOSC=INTOSC</code>.</li>
+              <li>Save config and any build options.</li>
+            </ol>
+            <h2>5. Generate and build</h2>
+            <ol>
+              <li>Click <b>Render Config</b> to preview configuration.</li>
+              <li>Click <b>Sync Config</b> to write the managed config block.</li>
+              <li>Click <b>Dry Run Build</b> and inspect the command.</li>
+              <li>Click <b>Build</b> for a real compile.</li>
+            </ol>
+            <h2>What success looks like</h2>
+            <p>The output pane should show the exact command, compiler output, and a clean process exit code. Generated artifacts such as <code>.hex</code> and <code>.occ</code> should appear in the project working directory according to the CC5X toolchain behavior.</p>
+            """,
+        ),
+        (
+            "Core Concepts",
+            """
+            <h1>Core Concepts</h1>
+            <h2>Pack-first metadata</h2>
+            <p>The tool prefers Microchip device packs over old monolithic MPLAB layouts. It normalizes information from <code>.PIC</code>, <code>.ini</code>, and <code>cfgdata</code> into one internal model.</p>
+            <h2>Manifest-driven workflow</h2>
+            <p>Instead of hiding state in <code>setcc.pxk</code>, the GUI stores repeatable project state in <code>setcc-native.json</code>.</p>
+            <h2>Editions</h2>
+            <p>An edition is one named build variant of the same project. Editions hold config symbols and build options. They do not replace the top-level project fields such as device, compiler, or main source.</p>
+            <h2>Managed config blocks</h2>
+            <p>The tool generates a managed <code>#pragma config</code> block. <b>Render Config</b> previews it. <b>Sync Config</b> writes or updates it in the configured source file.</p>
+            <h2>Header generation</h2>
+            <p>Headers can be generated from pack metadata, supplied explicitly, or treated as pre-existing files. Generated headers are useful for newer devices that BKND may never have shipped.</p>
+            <h2>Runner vs compiler</h2>
+            <p>The compiler is the actual CC5X executable. The runner is optional and wraps the compiler, for example with CrossOver or Wine. If you use a runner, the app constructs the final command line for you.</p>
             """,
         ),
         (
@@ -243,7 +313,7 @@ def help_sections() -> list[tuple[str, str]]:
             """,
         ),
         (
-            "Projects",
+            "Projects Overview",
             """
             <h1>Projects Tab</h1>
             <p>This is the main working area for repeatable builds. It manages a JSON manifest, edition-specific config values, build options, header generation, and actual builds.</p>
@@ -288,6 +358,58 @@ def help_sections() -> list[tuple[str, str]]:
             """,
         ),
         (
+            "Project Fields",
+            """
+            <h1>Project Fields Reference</h1>
+            <h2>Project</h2>
+            <p>Path to the manifest file. This is where the GUI reads and writes project state. Use one manifest per project root unless you have a strong reason to separate them.</p>
+            <h2>Device</h2>
+            <p>Target MCU name such as <code>PIC10F320</code>, <code>PIC12F1840</code>, or <code>PIC16F15313</code>. This value drives metadata lookup, config symbol discovery, header generation, and build flags.</p>
+            <h2>Compiler</h2>
+            <p>Path to the real CC5X executable. If this is wrong, build commands will fail before meaningful compilation starts.</p>
+            <h2>Runner</h2>
+            <p>Optional wrapper command used to launch the compiler. Common examples are CrossOver launchers and Wine. Leave it empty if the compiler is directly runnable.</p>
+            <h2>MPLAB Root</h2>
+            <p>Optional legacy metadata root. This matters only if you want to force metadata lookup into an old MPLAB layout instead of the modern pack-first search path.</p>
+            <h2>Header Mode</h2>
+            <p>Controls how the project resolves the header used during builds. See the dedicated <b>Header Modes</b> section for behavior and tradeoffs.</p>
+            <h2>Header Path</h2>
+            <p>Path to the header file or target header location. The meaning depends on header mode. In generated mode, this is typically where the generated header will live. In supplied or existing mode, it identifies the header to use.</p>
+            <h2>Main Source</h2>
+            <p>Main C source file passed to the compiler for builds. The GUI does not guess this from the directory.</p>
+            <h2>Config Source</h2>
+            <p>Source file that should contain the managed config block. This can be the same file as <b>Main Source</b> or a separate config-focused source file.</p>
+            <h2>Save Project</h2>
+            <p>Validates and writes these fields to the manifest. If validation fails, the manifest is not silently accepted.</p>
+            """,
+        ),
+        (
+            "Editions",
+            """
+            <h1>Editions Reference</h1>
+            <p>Editions are named build variants under one project. They let you keep one device and one source layout while changing config values or compiler flags.</p>
+            <h2>Typical edition names</h2>
+            <ul>
+              <li><code>production</code></li>
+              <li><code>debug</code></li>
+              <li><code>qa</code></li>
+              <li><code>factory</code></li>
+            </ul>
+            <h2>Add</h2>
+            <p>Creates a new edition. If another edition is currently selected, the new one copies from that edition. This is useful when creating a close variant instead of starting from empty state.</p>
+            <h2>Delete</h2>
+            <p>Removes the selected edition from the manifest. This is a manifest change, not just a UI change.</p>
+            <h2>Edition Config</h2>
+            <p>One <code>NAME=VALUE</code> pair per line. Blank lines and comment lines starting with <code>#</code> are ignored. These values override pack defaults when config blocks are rendered or synced.</p>
+            <h2>Clear Config</h2>
+            <p>Removes all stored config values from the selected edition. It does not remove the edition itself.</p>
+            <h2>Edition Build Options</h2>
+            <p>One CC5X option per line. These are appended after the project device and include-path options generated by the tool.</p>
+            <h2>Selection behavior</h2>
+            <p>Most edition-specific actions require a selected edition. If none is selected, the GUI will stop with a user-facing error dialog instead of running with ambiguous state.</p>
+            """,
+        ),
+        (
             "Header Modes",
             """
             <h1>Header Modes</h1>
@@ -301,6 +423,18 @@ def help_sections() -> list[tuple[str, str]]:
               <li>Use <b>generated</b> for newer devices or when BKND did not ship a header.</li>
               <li>Use <b>supplied</b> when you want to keep a generated header under version control at a specific path.</li>
               <li>Use <b>existing</b> when you already maintain the header yourself.</li>
+            </ul>
+            <h2>Practical guidance</h2>
+            <ul>
+              <li>Use <b>generated</b> unless you already know you need another mode.</li>
+              <li>Use <b>supplied</b> when you want a stable, version-controlled generated header path inside your repo.</li>
+              <li>Use <b>existing</b> when you trust the header and do not want cc5x-helper to regenerate it.</li>
+            </ul>
+            <h2>Common mistakes</h2>
+            <ul>
+              <li>Choosing <b>existing</b> but pointing to a file that does not exist yet.</li>
+              <li>Choosing <b>generated</b> but forgetting that the header still needs a valid output path.</li>
+              <li>Assuming a shipped BKND header is required for a newer device. It is not.</li>
             </ul>
             """,
         ),
@@ -323,6 +457,18 @@ def help_sections() -> list[tuple[str, str]]:
               <li><b>Render Config</b> is preview only.</li>
               <li><b>Sync Config</b> modifies the configured source file.</li>
               <li>The tool merges pack defaults with edition overrides, with the edition winning.</li>
+            </ul>
+            <h2>Recommended editing discipline</h2>
+            <ul>
+              <li>Keep edition config lines small and explicit.</li>
+              <li>Preview before syncing when changing multiple symbols.</li>
+              <li>Treat the managed block as generated output, not as hand-maintained text.</li>
+            </ul>
+            <h2>How to interpret errors</h2>
+            <ul>
+              <li>If symbol names are invalid, re-check the device and use <b>List Config</b> in the <b>Devices</b> tab.</li>
+              <li>If the source file does not exist, the sync operation will fail at file I/O time.</li>
+              <li>If the config block looks wrong, verify the selected edition and the pack defaults for that part.</li>
             </ul>
             """,
         ),
@@ -347,6 +493,77 @@ def help_sections() -> list[tuple[str, str]]:
             </ol>
             <h2>One active build at a time</h2>
             <p>The GUI prevents launching another build while one is already running.</p>
+            <h2>Reading build output</h2>
+            <ul>
+              <li>The first lines show the exact command line used.</li>
+              <li>Compiler messages are streamed live into the output pane.</li>
+              <li>The final process exit line tells you whether the command returned success.</li>
+            </ul>
+            <h2>Dry run vs real build</h2>
+            <ul>
+              <li><b>Dry Run Build</b> is for command verification only.</li>
+              <li><b>Build</b> actually launches the compiler and may produce artifacts or errors.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Output Pane",
+            """
+            <h1>Output Pane</h1>
+            <p>Every tab uses the output pane as the ground-truth display for command results.</p>
+            <h2>What appears there</h2>
+            <ul>
+              <li>JSON reports from environment and device inspection.</li>
+              <li>Rendered header text.</li>
+              <li>Rendered config blocks.</li>
+              <li>Manifest summaries and edition summaries.</li>
+              <li>Compiler stdout and stderr during builds.</li>
+            </ul>
+            <h2>How to use it</h2>
+            <ul>
+              <li>Read it before assuming the GUI did the wrong thing.</li>
+              <li>Use it to verify exactly which device, edition, and files are involved.</li>
+              <li>Use dry-run output to debug path and runner issues before invoking a real build.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Packaging And Runtime",
+            """
+            <h1>Packaging And Runtime</h1>
+            <h2>Source launch</h2>
+            <p>During development, launch with <code>python3 tools/cc5x_helper_gui.py</code>.</p>
+            <h2>Packaged launch</h2>
+            <p>The packaged GUI binary lives at <code>dist/cc5x-helper-gui</code> after a GUI build.</p>
+            <h2>How the package is built</h2>
+            <p>The project uses <code>uv</code> and PyInstaller through <code>tools/build_linux_executable.sh gui</code>.</p>
+            <h2>Linux platform issues</h2>
+            <ul>
+              <li>If a desktop environment injects a bad Qt platform theme, force <code>QT_QPA_PLATFORM=xcb</code>.</li>
+              <li>The GUI defaults to safer Linux Qt settings when possible.</li>
+              <li>Launching from <code>dist/</code> no longer forces the manifest into <code>dist/setcc-native.json</code>.</li>
+            </ul>
+            <h2>Binary size</h2>
+            <p>The GUI executable is large because it bundles a Qt runtime. That is normal for the current packaging approach.</p>
+            """,
+        ),
+        (
+            "CLI Relationship",
+            """
+            <h1>CLI Relationship</h1>
+            <p>The GUI is not a separate implementation. It is a front end over the same helper library and CLI-oriented workflow.</p>
+            <h2>Why this matters</h2>
+            <ul>
+              <li>Results in the GUI should match the underlying CLI behavior for the same manifest and options.</li>
+              <li>If something is unclear in the GUI, the CLI remains the most direct reference path.</li>
+              <li>Advanced automation should still use the CLI or library modules.</li>
+            </ul>
+            <h2>When to prefer the CLI</h2>
+            <ul>
+              <li>Batch automation.</li>
+              <li>CI or scripted validation.</li>
+              <li>Precise command-line experimentation.</li>
+            </ul>
             """,
         ),
         (
@@ -361,6 +578,15 @@ def help_sections() -> list[tuple[str, str]]:
               <li><b>build fails immediately</b>: check the compiler path, runner path, and build command via <b>Dry Run Build</b>.</li>
               <li><b>packaged GUI launched from dist</b>: the GUI now prefers the project root above <code>dist/</code>, but you can also set <code>CC5X_HELPER_PROJECT</code> explicitly.</li>
             </ul>
+            <h2>Troubleshooting matrix</h2>
+            <table border="1" cellspacing="0" cellpadding="6">
+              <tr><th>Symptom</th><th>Likely cause</th><th>What to do</th></tr>
+              <tr><td>Probe fails</td><td>Device not present in installed packs or spelling mismatch</td><td>Use <b>Environment -> List Devices</b> and re-check the part name.</td></tr>
+              <tr><td>Build command looks wrong</td><td>Project fields or runner are misconfigured</td><td>Use <b>Dry Run Build</b> and fix the manifest fields.</td></tr>
+              <tr><td>Config output is incomplete</td><td>Wrong edition selected or no stored overrides</td><td>Use <b>Show Edition</b> and <b>Render Config</b> before syncing.</td></tr>
+              <tr><td>Header generation fails</td><td>Metadata lookup failed or header path is invalid</td><td>Probe the device first and confirm the header mode and path.</td></tr>
+              <tr><td>GUI shows a dialog but no output</td><td>User-facing validation error stopped the action</td><td>Read the dialog text first. The app is blocking a risky or ambiguous action.</td></tr>
+            </table>
             <h2>Error handling</h2>
             <p>The GUI wraps button actions and application-level exceptions. Normal user errors should appear as dialogs instead of crashing the process.</p>
             <h2>When to inspect raw output</h2>
@@ -505,6 +731,7 @@ class HelpDialog(QDialog):
         self.tabs = tabs
 
     def show_section(self, title: str) -> None:
+        title = normalize_help_title(title)
         for index in range(self.tabs.count()):
             if self.tabs.tabText(index) == title:
                 self.tabs.setCurrentIndex(index)
@@ -512,6 +739,37 @@ class HelpDialog(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+
+
+class HelpTab(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+
+        self.section_list = QListWidget()
+        self.viewer = QTextEdit()
+        self.viewer.setReadOnly(True)
+
+        for title, _html in help_sections():
+            self.section_list.addItem(title)
+        self.section_list.currentTextChanged.connect(self.show_section)
+
+        layout.addWidget(self.section_list, 1)
+        layout.addWidget(self.viewer, 3)
+
+        if self.section_list.count():
+            self.section_list.setCurrentRow(0)
+
+    def show_section(self, title: str) -> None:
+        title = normalize_help_title(title)
+        for index, (section_title, html) in enumerate(help_sections()):
+            if section_title == title:
+                if self.section_list.currentRow() != index:
+                    self.section_list.blockSignals(True)
+                    self.section_list.setCurrentRow(index)
+                    self.section_list.blockSignals(False)
+                self.viewer.setHtml(html)
+                break
 
 
 class DeviceTab(QWidget):
@@ -1080,6 +1338,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.help_dialog: HelpDialog | None = None
+        self.help_tab = HelpTab()
         self.setWindowTitle("cc5x-helper")
         self.resize(1400, 880)
         self.setStyleSheet(
@@ -1122,6 +1381,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(EnvironmentTab(self.show_help_section), "Environment")
         self.tabs.addTab(DeviceTab(self.show_help_section), "Devices")
         self.tabs.addTab(ProjectTab(self.show_help_section), "Projects")
+        self.tabs.addTab(self.help_tab, "Help")
         self.setCentralWidget(self.tabs)
 
         quit_action = QAction("Quit", self)
@@ -1144,12 +1404,17 @@ class MainWindow(QMainWindow):
         self.show_help_section("Welcome")
 
     def show_current_tab_help(self) -> None:
-        self.show_help_section(self.tabs.tabText(self.tabs.currentIndex()))
+        current = self.tabs.tabText(self.tabs.currentIndex())
+        if current == "Help":
+            current = "Welcome"
+        self.show_help_section(current)
 
     def show_help_section(self, title: str) -> None:
+        normalized = normalize_help_title(title)
+        self.help_tab.show_section(normalized)
         if self.help_dialog is None:
             self.help_dialog = HelpDialog(self)
-        self.help_dialog.show_section(title)
+        self.help_dialog.show_section(normalized)
 
 
 def main() -> int:
