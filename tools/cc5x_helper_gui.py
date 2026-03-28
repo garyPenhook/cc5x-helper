@@ -118,6 +118,45 @@ def format_json(payload: object) -> str:
     return json.dumps(payload, indent=2)
 
 
+def candidate_project_paths() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    env_path = os.environ.get("CC5X_HELPER_PROJECT")
+    if env_path:
+        path = Path(env_path).expanduser()
+        candidates.append(path)
+        seen.add(path)
+
+    roots = [Path.cwd()]
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    else:
+        roots.append(Path(__file__).resolve().parent)
+
+    for root in roots:
+        if root.name == "dist":
+            candidate = root.parent / "setcc-native.json"
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+        for base in [root, *root.parents]:
+            candidate = base / "setcc-native.json"
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+
+    return candidates
+
+
+def default_project_path() -> Path:
+    candidates = candidate_project_paths()
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
 def parse_multiline_pairs(text: str) -> dict[str, str]:
     items = []
     for line in text.splitlines():
@@ -369,7 +408,7 @@ class ProjectTab(QWidget):
 
         root_layout = QVBoxLayout(self)
         path_row = QHBoxLayout()
-        self.project_path_edit = QLineEdit(str(Path.cwd() / "setcc-native.json"))
+        self.project_path_edit = QLineEdit(str(default_project_path()))
         path_row.addWidget(QLabel("Project"))
         path_row.addWidget(self.project_path_edit, 1)
         browse_button = QPushButton("Browse")
