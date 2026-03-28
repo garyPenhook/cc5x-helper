@@ -42,6 +42,8 @@ The project uses shipped BKND headers only as compatibility references and contr
 
 Main CLI: [tools/cc5x_setcc_native.py](tools/cc5x_setcc_native.py)
 
+Desktop GUI: [tools/cc5x_helper_gui.py](tools/cc5x_helper_gui.py)
+
 Core commands:
 
 - `probe`
@@ -111,6 +113,12 @@ Validation uses the real `CC5X.EXE` under CrossOver.
 
 ## Quick Start
 
+Launch the GUI:
+
+```bash
+python3 tools/cc5x_helper_gui.py
+```
+
 List locally discoverable devices:
 
 ```bash
@@ -176,6 +184,15 @@ python3 tools/cc5x_setcc_native.py build \
   --project setcc-native.json \
   --edition production
 ```
+
+The GUI exposes the same workflow in three tabs:
+
+- `Environment`
+  - run `doctor` and browse local device-pack coverage
+- `Devices`
+  - probe and describe one device, list config symbols, render headers and config blocks
+- `Projects`
+  - create/load manifests, edit top-level project fields, manage editions, sync config, and launch builds
 
 Inspect and edit the manifest from the CLI:
 

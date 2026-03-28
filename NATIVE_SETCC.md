@@ -9,6 +9,8 @@
 
 The bundled `tools/cc5x_setcc_native.py` replaces the scriptable parts cleanly on Linux without depending on the GUI.
 
+A PyQt6 desktop front end now exists at [tools/cc5x_helper_gui.py](/home/gary/apps/cc5x_paid/tools/cc5x_helper_gui.py) for users who want the workflow as a Linux desktop application instead of only as a CLI.
+
 The implementation direction should also consider Microchip technical brief `TB3261` in [getting_started_C.pdf](/home/gary/apps/cc5x_paid/getting_started_C.pdf). That brief is useful as a reference for modern PIC naming conventions and configuration practices, even though its examples target XC8-style headers rather than CC5X syntax.
 
 ## What It Covers
@@ -57,6 +59,8 @@ The implementation direction should also consider Microchip technical brief `TB3
   - compares generated and shipped-header control cases for selected devices
 - `tools/build_linux_executable.sh`
   - packages the CLI as a Linux executable with `uv` and PyInstaller
+- `tools/cc5x_helper_gui.py`
+  - provides a PyQt6 desktop GUI over the same device, project, config, and build workflows
 
 ## Why This Is A Better Direction
 
@@ -249,6 +253,12 @@ uv run --python 3.13 --with pyinstaller pyinstaller \
   --name cc5x-helper \
   --paths tools \
   tools/cc5x_setcc_native.py
+```
+
+Launch the PyQt6 GUI:
+
+```bash
+python3 tools/cc5x_helper_gui.py
 ```
 
 ## Current Limits
