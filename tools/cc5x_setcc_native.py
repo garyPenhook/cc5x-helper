@@ -12,31 +12,58 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from cc5x_setcc_native_lib.headergen import (
-    render_dynamic_config_section,
-    render_full_header,
-)
-from cc5x_setcc_native_lib.packs import (
-    discover_atpack_dirs,
-    find_device_in_atpacks,
-    find_device_in_unpacked_packs,
-    list_devices_in_atpacks,
-    normalize_device_name,
-)
-from cc5x_setcc_native_lib.picmeta import load_device_metadata
-from cc5x_setcc_native_lib.project import (
-    delete_project_edition,
-    default_project_manifest,
-    load_project_file,
-    project_summary,
-    remove_project_edition_config,
-    set_project_edition,
-    update_project_fields,
-    update_project_edition_build_options,
-    update_project_edition_config,
-    validate_project_file,
-    write_project_file,
-)
+try:
+    from cc5x_setcc_native_lib.headergen import (
+        render_dynamic_config_section,
+        render_full_header,
+    )
+    from cc5x_setcc_native_lib.packs import (
+        discover_atpack_dirs,
+        find_device_in_atpacks,
+        find_device_in_unpacked_packs,
+        list_devices_in_atpacks,
+        normalize_device_name,
+    )
+    from cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from cc5x_setcc_native_lib.project import (
+        delete_project_edition,
+        default_project_manifest,
+        load_project_file,
+        project_summary,
+        remove_project_edition_config,
+        set_project_edition,
+        update_project_fields,
+        update_project_edition_build_options,
+        update_project_edition_config,
+        validate_project_file,
+        write_project_file,
+    )
+except ModuleNotFoundError:
+    from tools.cc5x_setcc_native_lib.headergen import (
+        render_dynamic_config_section,
+        render_full_header,
+    )
+    from tools.cc5x_setcc_native_lib.packs import (
+        discover_atpack_dirs,
+        find_device_in_atpacks,
+        find_device_in_unpacked_packs,
+        list_devices_in_atpacks,
+        normalize_device_name,
+    )
+    from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from tools.cc5x_setcc_native_lib.project import (
+        delete_project_edition,
+        default_project_manifest,
+        load_project_file,
+        project_summary,
+        remove_project_edition_config,
+        set_project_edition,
+        update_project_fields,
+        update_project_edition_build_options,
+        update_project_edition_config,
+        validate_project_file,
+        write_project_file,
+    )
 
 
 CONFIG_LINE_RE = re.compile(
