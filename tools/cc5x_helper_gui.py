@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import shlex
 import subprocess
@@ -138,10 +139,27 @@ def parse_multiline_options(text: str) -> list[str]:
 
 
 def gui_action(method):
+    signature = inspect.signature(method)
+    positional_params = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    accepts_varargs = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    )
+    max_args = max(0, len(positional_params) - 1)
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         try:
-            return method(self, *args, **kwargs)
+            if accepts_varargs:
+                return method(self, *args, **kwargs)
+            return method(self, *args[:max_args], **kwargs)
         except SystemExit as exc:
             self.show_error(str(exc) or method.__name__)
         except Exception as exc:
