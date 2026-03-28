@@ -6,6 +6,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import traceback
 from argparse import Namespace
 from functools import wraps
 from pathlib import Path
@@ -147,6 +149,56 @@ def gui_action(method):
         return None
 
     return wrapped
+
+
+def format_exception_message(exc_type, exc_value, exc_traceback) -> str:
+    summary = "".join(traceback.format_exception_only(exc_type, exc_value)).strip()
+    details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    return summary, details
+
+
+def show_global_error(summary: str, details: str) -> None:
+    print(details, file=sys.stderr, flush=True)
+    app = QApplication.instance()
+    if app is None:
+        return
+    active = app.activeWindow()
+    box = QMessageBox(active)
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.setWindowTitle("cc5x-helper")
+    box.setText(summary)
+    box.setDetailedText(details)
+    box.exec()
+
+
+def install_exception_hooks() -> None:
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        summary, details = format_exception_message(exc_type, exc_value, exc_traceback)
+        show_global_error(summary, details)
+
+    def handle_thread_exception(args):
+        summary, details = format_exception_message(
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+        )
+        show_global_error(summary, details)
+
+    sys.excepthook = handle_exception
+    threading.excepthook = handle_thread_exception
+
+
+class SafeApplication(QApplication):
+    def notify(self, receiver, event):
+        try:
+            return super().notify(receiver, event)
+        except Exception:
+            summary, details = format_exception_message(*sys.exc_info())
+            show_global_error(summary, details)
+            return False
 
 
 class OutputPane(QPlainTextEdit):
@@ -754,7 +806,8 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    install_exception_hooks()
+    app = SafeApplication(sys.argv)
     window = MainWindow()
     window.show()
     return app.exec()
