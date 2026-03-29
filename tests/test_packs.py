@@ -5,22 +5,40 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from tools.cc5x_setcc_native_lib.packs import (
-    find_device_in_atpacks,
-    is_cc5x_device,
-    list_devices_in_atpacks,
-    normalize_device_name,
-    parse_pack_archive_info,
-)
-from tools.cc5x_setcc_native_lib.headergen import (
-    render_dynamic_config_section,
-    render_full_header,
-)
-from tools.cc5x_setcc_native_lib.picmeta import (
-    load_device_metadata,
-    parse_cfgdata_text,
-    parse_ini_text,
-)
+try:
+    from cc5x_setcc_native_lib.packs import (
+        find_device_in_atpacks,
+        is_cc5x_device,
+        list_devices_in_atpacks,
+        normalize_device_name,
+        parse_pack_archive_info,
+    )
+    from cc5x_setcc_native_lib.headergen import (
+        render_dynamic_config_section,
+        render_full_header,
+    )
+    from cc5x_setcc_native_lib.picmeta import (
+        load_device_metadata,
+        parse_cfgdata_text,
+        parse_ini_text,
+    )
+except ModuleNotFoundError:
+    from tools.cc5x_setcc_native_lib.packs import (
+        find_device_in_atpacks,
+        is_cc5x_device,
+        list_devices_in_atpacks,
+        normalize_device_name,
+        parse_pack_archive_info,
+    )
+    from tools.cc5x_setcc_native_lib.headergen import (
+        render_dynamic_config_section,
+        render_full_header,
+    )
+    from tools.cc5x_setcc_native_lib.picmeta import (
+        load_device_metadata,
+        parse_cfgdata_text,
+        parse_ini_text,
+    )
 
 
 def create_atpack(path: Path, members: dict[str, str]) -> None:

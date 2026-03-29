@@ -5,19 +5,34 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.cc5x_setcc_native_lib.project import (
-    delete_project_edition,
-    default_project_manifest,
-    load_project_file,
-    project_summary,
-    remove_project_edition_config,
-    set_project_edition,
-    update_project_fields,
-    update_project_edition_build_options,
-    update_project_edition_config,
-    validate_project_file,
-    write_project_file,
-)
+try:
+    from cc5x_setcc_native_lib.project import (
+        delete_project_edition,
+        default_project_manifest,
+        load_project_file,
+        project_summary,
+        remove_project_edition_config,
+        set_project_edition,
+        update_project_fields,
+        update_project_edition_build_options,
+        update_project_edition_config,
+        validate_project_file,
+        write_project_file,
+    )
+except ModuleNotFoundError:
+    from tools.cc5x_setcc_native_lib.project import (
+        delete_project_edition,
+        default_project_manifest,
+        load_project_file,
+        project_summary,
+        remove_project_edition_config,
+        set_project_edition,
+        update_project_fields,
+        update_project_edition_build_options,
+        update_project_edition_config,
+        validate_project_file,
+        write_project_file,
+    )
 
 
 class ProjectFileTests(unittest.TestCase):
