@@ -28,6 +28,28 @@ export interface DeviceInfo {
   pdsc: string | null;
 }
 
+/** One legal value for a config symbol, from `list-pack-config --device <dev> --json`. */
+export interface ConfigOption {
+  register: number;
+  mask: string;
+  state: string;
+  comment: string;
+}
+
+/**
+ * Legal config symbols for a device, keyed by symbol name (e.g. `BOREN`), each mapping
+ * to its allowed states. This is the pack-derived source of truth the config editor
+ * offers the user — only states present here are legal for the device.
+ */
+export type PackConfig = Record<string, ConfigOption[]>;
+
+/** One edition's stored config + build options (from `project-show --edition <e> --json`). */
+export interface EditionConfig {
+  name: string;
+  config: Record<string, string>;
+  build_options: string[];
+}
+
 function config(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration('cc5x');
 }
@@ -186,6 +208,51 @@ export function loadProject(root: vscode.WorkspaceFolder): Promise<ProjectInfo> 
  */
 export function listDevices(root: vscode.WorkspaceFolder): Promise<DeviceInfo[]> {
   return runHelperJson<DeviceInfo[]>(root, ['list-devices']);
+}
+
+/**
+ * List the legal dynamic-config symbols and their allowed states for a device, straight
+ * from pack metadata (`list-pack-config --device <dev> --json`). Used by the config editor
+ * to constrain the user to values the device actually supports.
+ */
+export function listPackConfig(
+  root: vscode.WorkspaceFolder,
+  device: string,
+): Promise<PackConfig> {
+  return runHelperJson<PackConfig>(root, ['list-pack-config', '--device', device]);
+}
+
+/** Load one edition's stored config via `project-show --edition <e> --json`. */
+export function loadEditionConfig(
+  root: vscode.WorkspaceFolder,
+  edition: string,
+): Promise<EditionConfig> {
+  return runHelperJson<EditionConfig>(root, [
+    'project-show',
+    '--project',
+    manifestAbsPath(root),
+    '--edition',
+    edition,
+  ]);
+}
+
+/**
+ * Set (`state` given) or remove (`state` null) one config symbol for an edition via
+ * `project-set-config`. Removing an override lets the device fall back to its default.
+ */
+export function updateEditionConfig(
+  root: vscode.WorkspaceFolder,
+  edition: string,
+  name: string,
+  state: string | null,
+): Promise<HelperResult> {
+  const args = ['project-set-config', '--project', manifestAbsPath(root), '--edition', edition];
+  if (state === null) {
+    args.push('--remove', name);
+  } else {
+    args.push('--set', `${name}=${state}`);
+  }
+  return runHelper(root, args);
 }
 
 /** Set the manifest's target device via `project-edit --device` (validates + writes). */

@@ -7,6 +7,9 @@ import {
   ProjectInfo,
   initProject,
   listDevices,
+  listPackConfig,
+  PackConfig,
+  loadEditionConfig,
   loadProject,
   manifestAbsPath,
   manifestWatchPattern,
@@ -14,6 +17,7 @@ import {
   runHelper,
   runHelperJson,
   setProjectDevice,
+  updateEditionConfig,
   workspaceRoot,
 } from './helper';
 import { publishCc5xDiagnostics } from './diagnostics';
@@ -64,6 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.generateTasks', () => generateTasks(root)),
     vscode.commands.registerCommand('cc5x.createProject', () => createProject(root)),
     vscode.commands.registerCommand('cc5x.selectDevice', () => selectDevice(root)),
+    vscode.commands.registerCommand('cc5x.editConfig', () => editConfig(root)),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
       // Binary artifacts (.hex/.cod/.cof) can't open as text; surface the error
@@ -326,6 +331,107 @@ async function selectDevice(root: vscode.WorkspaceFolder | undefined): Promise<v
       `CC5X: failed to set device to ${device}. See the CC5X output channel.`,
     );
   }
+}
+
+/**
+ * Config editor (quick-pick): edit an edition's dynamic-config symbols, constrained to the
+ * legal states the device's pack metadata allows (Phase 3). Loops so several symbols can be
+ * set in one session — Esc at the symbol list finishes. Each change is written immediately
+ * via `project-set-config` (set NAME=STATE, or remove the override to fall back to the
+ * device default).
+ */
+async function editConfig(root: vscode.WorkspaceFolder | undefined): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  const edition = await pickEdition(root, 'Select edition to configure');
+  if (!edition) {
+    return;
+  }
+  // The device determines which symbols/values are legal. pickEdition already loaded the
+  // manifest into currentProject, so read the device straight from the cached snapshot.
+  const device = currentProject?.device;
+  if (!device) {
+    vscode.window.showErrorMessage('CC5X: no device set in the manifest. Select a device first.');
+    return;
+  }
+  let symbols: PackConfig;
+  try {
+    symbols = await listPackConfig(root, device);
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `CC5X: could not load config metadata for ${device}: ${String(err)}`,
+    );
+    return;
+  }
+  const names = Object.keys(symbols).sort();
+  if (names.length === 0) {
+    vscode.window.showInformationMessage(`CC5X: ${device} exposes no dynamic config symbols.`);
+    return;
+  }
+
+  // Pick a symbol → pick a legal value → write → repeat. Re-read the edition config each pass
+  // so the displayed "current" values reflect writes made earlier in the same session.
+  for (;;) {
+    let current: Record<string, string>;
+    try {
+      current = (await loadEditionConfig(root, edition)).config;
+    } catch (err) {
+      vscode.window.showErrorMessage(`CC5X: could not read edition config: ${String(err)}`);
+      return;
+    }
+    const symbolItems: vscode.QuickPickItem[] = names.map((name) => {
+      const value = current[name];
+      const option = value ? symbols[name].find((o) => o.state === value) : undefined;
+      return {
+        label: name,
+        description: value ? `= ${value}` : '(device default)',
+        detail: option?.comment || undefined,
+      };
+    });
+    const pickedSymbol = await vscode.window.showQuickPick(symbolItems, {
+      placeHolder: `Edit ${edition} config for ${device} — pick a symbol (Esc to finish)`,
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (!pickedSymbol) {
+      break;
+    }
+    const name = pickedSymbol.label;
+    const currentValue = current[name];
+    const RESET_LABEL = '$(discard) Reset to device default';
+    const valueItems: vscode.QuickPickItem[] = symbols[name].map((o) => ({
+      label: o.state,
+      description: o.state === currentValue ? `${o.comment}  ● current` : o.comment,
+    }));
+    if (currentValue !== undefined) {
+      valueItems.unshift({ label: RESET_LABEL, description: `Remove the ${name} override` });
+    }
+    const pickedValue = await vscode.window.showQuickPick(valueItems, {
+      placeHolder: `${name}: select a value`,
+      matchOnDescription: true,
+    });
+    if (!pickedValue) {
+      continue; // back to the symbol list without changing anything
+    }
+    const state = pickedValue.label === RESET_LABEL ? null : pickedValue.label;
+    let result: HelperResult;
+    try {
+      result = await updateEditionConfig(root, edition, name, state);
+    } catch (err) {
+      vscode.window.showErrorMessage(`CC5X: could not update config: ${String(err)}`);
+      return;
+    }
+    if (result.code !== 0) {
+      channel.show(true);
+      channel.appendLine(result.stdout + result.stderr);
+      vscode.window.showErrorMessage(`CC5X: failed to set ${name}. See the CC5X output channel.`);
+      return;
+    }
+    // No explicit reload here: the next pass reads the edition config fresh from disk via
+    // loadEditionConfig, and the manifest watcher refreshes currentProject for everything else.
+  }
+  vscode.window.showInformationMessage(`CC5X: finished editing ${edition} config.`);
 }
 
 async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void> {
