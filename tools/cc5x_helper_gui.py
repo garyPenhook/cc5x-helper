@@ -1146,25 +1146,29 @@ class ProjectTab(QWidget):
 
     @gui_action
     def new_project(self) -> None:
-        project_path = self.project_path()
-        # Match the CLI (--force) and extension (confirm prompt): never silently clobber an
-        # existing manifest. Ask before overwriting.
-        if project_path.exists():
-            choice = QMessageBox.question(
-                self,
-                "cc5x-helper",
-                f"{project_path} already exists. Overwrite it with a new manifest?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if choice != QMessageBox.StandardButton.Yes:
-                self.output.write_text(f"cancelled: {project_path} was not overwritten")
-                return
+        # Let the user pick WHERE the new project lives via a Save-As dialog (browse to any
+        # user-defined folder and name the manifest) instead of hand-typing the full path.
+        # getSaveFileName handles its own native overwrite confirmation.
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Create Project Manifest",
+            str(self.project_path()),
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not chosen:
+            self.output.write_text("cancelled: no location chosen for the new project")
+            return
+        project_path = Path(chosen)
+        if project_path.suffix == "":
+            project_path = project_path.with_suffix(".json")
+        self.project_path_edit.setText(str(project_path))
+
+        main_source = self.main_source_edit.text().strip() or "app.c"
         project = default_project_manifest(
             device=self.device_edit.text().strip() or "PIC16F1509",
             compiler=self.compiler_edit.text().strip() or str(DEFAULT_COMPILER),
             runner=self.runner_edit.text().strip() or None,
-            main_source=self.main_source_edit.text().strip() or "app.c",
+            main_source=main_source,
             config_source=self.config_source_edit.text().strip() or "app.c",
             header_mode=self.header_mode_combo.currentText(),
             header_path=self.header_path_edit.text().strip() or None,
@@ -1172,8 +1176,20 @@ class ProjectTab(QWidget):
         )
         project_path.parent.mkdir(parents=True, exist_ok=True)
         write_project_file(project, project_path)
+
+        # Scaffold an empty main source next to the manifest (relative paths resolve against
+        # the manifest dir) so the new project is buildable without a manual file-create step.
+        # Never clobber an existing source file.
+        source_path = project_path_join(project_path, main_source)
+        created_source = False
+        if not source_path.exists():
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("", encoding="latin-1")
+            created_source = True
+
         self.load_project()
-        self.output.write_text(f"created {project_path}")
+        note = f" (+ empty {source_path.name})" if created_source else ""
+        self.output.write_text(f"created {project_path}{note}")
 
     @gui_action
     def load_project(self) -> None:
