@@ -1,0 +1,106 @@
+{
+  "name": "cc5x-vscode",
+  "displayName": "CC5X Tools",
+  "description": "Build and program PIC10F/12F/16F projects with the CC5X compiler and MPLAB IPECMD (PICkit 4/5).",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:setcc-native.json"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "cc5x.doctor", "title": "Doctor", "category": "CC5X" },
+      { "command": "cc5x.build", "title": "Build", "category": "CC5X" },
+      { "command": "cc5x.program", "title": "Program Device", "category": "CC5X" },
+      { "command": "cc5x.generateTasks", "title": "Generate VS Code Tasks", "category": "CC5X" },
+      { "command": "cc5x.refreshArtifacts", "title": "Refresh Artifacts", "category": "CC5X", "icon": "$(refresh)" },
+      { "command": "cc5x.openArtifact", "title": "Open Artifact", "category": "CC5X" }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "cc5x",
+        "required": ["action", "edition"],
+        "properties": {
+          "action": { "type": "string", "enum": ["build"], "description": "CC5X task action." },
+          "edition": { "type": "string", "description": "Project edition to build." },
+          "project": { "type": "string", "description": "Manifest path (default: cc5x.manifest setting)." }
+        }
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "CC5X",
+      "properties": {
+        "cc5x.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python interpreter used to run the CC5X helper."
+        },
+        "cc5x.helperPath": {
+          "type": "string",
+          "default": "tools/cc5x_setcc_native.py",
+          "description": "Workspace-relative path to cc5x_setcc_native.py."
+        },
+        "cc5x.manifest": {
+          "type": "string",
+          "default": "setcc-native.json",
+          "description": "Workspace-relative path to the CC5X project manifest."
+        },
+        "cc5x.programmerTool": {
+          "type": "string",
+          "default": "PK4",
+          "description": "IPECMD -TP tool code (PK4=PICkit 4, PK5=PICkit 5, SNAP, ICD4)."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "cc5xArtifacts",
+          "name": "CC5X Artifacts",
+          "icon": "$(circuit-board)",
+          "contextualTitle": "CC5X Artifacts"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "cc5x.refreshArtifacts", "when": "view == cc5xArtifacts", "group": "navigation" }
+      ]
+    },
+    "problemMatchers": [
+      {
+        "name": "cc5x",
+        "owner": "cc5x",
+        "source": "CC5X",
+        "fileLocation": ["autoDetect", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(Error|Warning)\\s+(.+?)\\s+(\\d+):\\s+(.*)$",
+          "severity": 1,
+          "file": 2,
+          "line": 3,
+          "message": 4
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.84.0",
+    "typescript": "^5.4.0"
+  }
+}

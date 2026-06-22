@@ -52,7 +52,9 @@ try:
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
         build_command,
+        build_options_for_project,
         default_pack_symbol_values,
+        merged_device_list,
         ensure_project_header,
         environment_report,
         find_device_metadata,
@@ -66,7 +68,7 @@ try:
         render_full_header,
         update_managed_block,
     )
-    from cc5x_setcc_native_lib.packs import list_devices_in_atpacks
+    from cc5x_setcc_native_lib.packs import CC5X_DEVICE_PREFIXES
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
     from cc5x_setcc_native_lib.project import (
         default_project_manifest,
@@ -86,7 +88,9 @@ except ModuleNotFoundError:
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
         build_command,
+        build_options_for_project,
         default_pack_symbol_values,
+        merged_device_list,
         ensure_project_header,
         environment_report,
         find_device_metadata,
@@ -100,7 +104,7 @@ except ModuleNotFoundError:
         render_full_header,
         update_managed_block,
     )
-    from tools.cc5x_setcc_native_lib.packs import list_devices_in_atpacks
+    from tools.cc5x_setcc_native_lib.packs import CC5X_DEVICE_PREFIXES
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
     from tools.cc5x_setcc_native_lib.project import (
         default_project_manifest,
@@ -877,7 +881,7 @@ class EnvironmentTab(QWidget):
 
         controls = QHBoxLayout()
         self.family_combo = QComboBox()
-        self.family_combo.addItems(["All", "PIC10F", "PIC12F", "PIC16F"])
+        self.family_combo.addItems(["All", *CC5X_DEVICE_PREFIXES])
         controls.addWidget(QLabel("Family"))
         controls.addWidget(self.family_combo)
 
@@ -912,8 +916,12 @@ class EnvironmentTab(QWidget):
     @gui_action
     def show_devices(self) -> None:
         family = self.family_combo.currentText()
-        prefixes = () if family == "All" else (family,)
-        self.output.write_text(format_json(list_devices_in_atpacks(prefixes=prefixes)))
+        # "All" means the CC5X-supported families, not literally every device; merge
+        # downloaded .atpack archives with installed MPLAB X packs so the GUI reports
+        # the same system-wide set as the CLI `list-devices` (audit A1). Reuse the
+        # canonical family set so the GUI and CLI never drift.
+        prefixes = CC5X_DEVICE_PREFIXES if family == "All" else (family,)
+        self.output.write_text(format_json(merged_device_list(prefixes=prefixes)))
 
 
 class ProjectTab(QWidget):
@@ -1304,12 +1312,7 @@ class ProjectTab(QWidget):
         command = build_command(
             compiler=project.compiler,
             main_file=str(project_path_join(project_path, project.main_source)),
-            options=[
-                f"-p{project.device[3:]}",
-                f"-I{header_path.parent}",
-                *project.base_build_options,
-                *edition.build_options,
-            ],
+            options=build_options_for_project(project, edition, header_path),
             runner=(shlex.split(project.runner) if project.runner else []),
         )
         if dry_run:
