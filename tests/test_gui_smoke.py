@@ -70,6 +70,62 @@ def test_new_project_cancel_writes_nothing(tmp_path) -> None:
         app.quit()
 
 
+def test_device_field_substring_completer_narrows() -> None:
+    """The device field offers a case-insensitive substring dropdown so typing part of a
+    device name (e.g. '1509') narrows to matching CC5X devices."""
+    import os
+    from unittest import mock
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication, QLineEdit
+    from PyQt6.QtCore import Qt
+
+    import cc5x_helper_gui
+
+    app = QApplication.instance() or QApplication([])
+    try:
+        cc5x_helper_gui.cc5x_device_names.cache_clear()
+        with mock.patch.object(
+            cc5x_helper_gui,
+            "merged_device_list",
+            return_value=[{"device": "PIC16F1509"}, {"device": "PIC12F1840"}],
+        ):
+            edit = QLineEdit()
+            cc5x_helper_gui.attach_device_completer(edit)
+        completer = edit.completer()
+        assert completer is not None, "device field should have a completer"
+        assert completer.filterMode() == Qt.MatchFlag.MatchContains
+        assert completer.caseSensitivity() == Qt.CaseSensitivity.CaseInsensitive
+        completer.setCompletionPrefix("1509")  # substring, not prefix
+        model = completer.completionModel()
+        matches = [model.index(i, 0).data() for i in range(model.rowCount())]
+        assert matches == ["PIC16F1509"], matches
+    finally:
+        cc5x_helper_gui.cc5x_device_names.cache_clear()
+        app.quit()
+
+
+def test_device_field_no_completer_when_no_devices() -> None:
+    import os
+    from unittest import mock
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication, QLineEdit
+
+    import cc5x_helper_gui
+
+    app = QApplication.instance() or QApplication([])
+    try:
+        cc5x_helper_gui.cc5x_device_names.cache_clear()
+        with mock.patch.object(cc5x_helper_gui, "merged_device_list", return_value=[]):
+            edit = QLineEdit()
+            cc5x_helper_gui.attach_device_completer(edit)
+        assert edit.completer() is None, "no devices -> plain text field, no completer"
+    finally:
+        cc5x_helper_gui.cc5x_device_names.cache_clear()
+        app.quit()
+
+
 def test_build_lock_buttons_toggle() -> None:
     """The build-state lock list must be populated and toggle together, otherwise
     the "disable controls during a build" safety guard is a no-op."""

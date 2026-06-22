@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import traceback
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 
 if sys.platform.startswith("linux"):
@@ -27,6 +27,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
+        QCompleter,
         QDialog,
         QFileDialog,
         QFormLayout,
@@ -128,6 +129,37 @@ except ModuleNotFoundError:
 
 def format_json(payload: object) -> str:
     return json.dumps(payload, indent=2)
+
+
+@lru_cache(maxsize=1)
+def cc5x_device_names() -> tuple[str, ...]:
+    """All discoverable CC5X-family device names, for device-field autocomplete.
+
+    Cached for the session (the pack walk is the same one ``List Devices`` runs); a pack
+    discovery failure yields an empty tuple so the GUI still opens with a plain text field.
+    """
+    try:
+        devices = merged_device_list(prefixes=CC5X_DEVICE_PREFIXES)
+        return tuple(str(device["device"]) for device in devices)
+    except Exception:
+        return ()
+
+
+def attach_device_completer(line_edit: "QLineEdit") -> None:
+    """Give a device QLineEdit a dropdown that narrows by substring as the user types.
+
+    Uses a case-insensitive, *contains* completer (so typing "1509" finds "PIC16F1509")
+    with a popup, backed by the discovered CC5X device list. No-op when no devices are
+    discoverable, leaving a normal free-text field.
+    """
+    names = cc5x_device_names()
+    if not names:
+        return
+    completer = QCompleter(list(names), line_edit)
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchContains)
+    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    line_edit.setCompleter(completer)
 
 
 def candidate_project_paths() -> list[Path]:
@@ -815,6 +847,7 @@ class DeviceTab(QWidget):
 
         form = QFormLayout()
         self.device_edit = QLineEdit("PIC16F1509")
+        attach_device_completer(self.device_edit)
         self.mplab_root_edit = QLineEdit()
         form.addRow("Device", self.device_edit)
         form.addRow("MPLAB Root", self.mplab_root_edit)
@@ -993,6 +1026,7 @@ class ProjectTab(QWidget):
         project_group = QGroupBox("Project")
         project_form = QFormLayout(project_group)
         self.device_edit = QLineEdit()
+        attach_device_completer(self.device_edit)
         self.compiler_edit = QLineEdit()
         self.runner_edit = QLineEdit()
         self.mplab_root_edit = QLineEdit()
