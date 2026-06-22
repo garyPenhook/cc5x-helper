@@ -1138,5 +1138,156 @@ class ValidateGeneratedHeadersTests(unittest.TestCase):
         self.assertEqual(result.header_path, str(header))
 
 
+class ResolveProjectManifestTests(unittest.TestCase):
+    """--workspace-root / default --project discovery for setcc-native.json."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        (self.root / "setcc-native.json").write_text("{}", encoding="utf-8")
+        self.sub = self.root / "a" / "b"
+        self.sub.mkdir(parents=True)
+        # Never let an ambient env override leak in from the runner's environment.
+        self._env = unittest.mock.patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ.pop("CC5X_HELPER_PROJECT", None)
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_bare_name_discovered_by_walking_up(self) -> None:
+        # From a deep subdirectory, the bare default name finds the ancestor manifest.
+        resolved = build.resolve_project_manifest("setcc-native.json", str(self.sub))
+        self.assertEqual(resolved, self.root / "setcc-native.json")
+
+    def test_absolute_path_is_used_verbatim(self) -> None:
+        absolute = str(Path(self._tmp.name).resolve() / "elsewhere" / "x.json")
+        self.assertEqual(
+            str(build.resolve_project_manifest(absolute, str(self.sub))), absolute
+        )
+
+    def test_relative_with_directory_component_anchors_to_root(self) -> None:
+        resolved = build.resolve_project_manifest("cfg/p.json", str(self.root))
+        self.assertEqual(resolved, self.root / "cfg" / "p.json")
+
+    def test_not_found_returns_conventional_location(self) -> None:
+        # A workspace with no manifest anywhere up the tree -> <root>/<name>. Use an
+        # independent temp dir so no ancestor (incl. self.root) carries a manifest.
+        with tempfile.TemporaryDirectory() as empty:
+            empty_root = Path(empty).resolve()
+            resolved = build.resolve_project_manifest("setcc-native.json", str(empty_root))
+            self.assertEqual(resolved, empty_root / "setcc-native.json")
+
+    def test_init_mode_skips_upward_walk(self) -> None:
+        # project-init must create at the anchored dir, not bind onto an ancestor manifest.
+        resolved = build.resolve_project_manifest(
+            "setcc-native.json", str(self.sub), discover=False
+        )
+        self.assertEqual(resolved, self.sub / "setcc-native.json")
+
+    def test_env_override_wins_for_bare_name(self) -> None:
+        os.environ["CC5X_HELPER_PROJECT"] = "/env/pinned.json"
+        resolved = build.resolve_project_manifest("setcc-native.json", str(self.sub))
+        self.assertEqual(str(resolved), "/env/pinned.json")
+
+    def test_explicit_absolute_beats_env_override(self) -> None:
+        os.environ["CC5X_HELPER_PROJECT"] = "/env/pinned.json"
+        resolved = build.resolve_project_manifest("/explicit/x.json", str(self.sub))
+        self.assertEqual(str(resolved), "/explicit/x.json")
+
+    def test_init_mode_ignores_env_override(self) -> None:
+        # project-init (discover=False) must create at the anchored dir even when the GUI's
+        # CC5X_HELPER_PROJECT pin is set, not redirect the new file elsewhere.
+        os.environ["CC5X_HELPER_PROJECT"] = "/env/pinned.json"
+        resolved = build.resolve_project_manifest(
+            "setcc-native.json", str(self.sub), discover=False
+        )
+        self.assertEqual(resolved, self.sub / "setcc-native.json")
+
+    def test_bad_tilde_user_raises_runtimeerror(self) -> None:
+        # main() converts this to a clean SystemExit; the resolver itself surfaces it.
+        with self.assertRaises(RuntimeError):
+            build.resolve_project_manifest("~nouser_zzz9999/x.json", str(self.root))
+
+    def test_main_empty_project_string_stays_standalone(self) -> None:
+        # `--project ''` must remain falsy so optional-project commands keep standalone
+        # mode; central resolution must not rewrite it into the workspace directory.
+        import contextlib
+        import io
+        import sys
+
+        argv = ["prog", "artifacts", "--project", "", "--dir", str(self.root), "--json"]
+        buf = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+            rc = build.main()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["search_dir"], str(self.root))
+
+    def test_workspace_root_discovers_for_optional_project_command(self) -> None:
+        # build/sync-config/artifacts/program have no --project default; an explicit
+        # --workspace-root must still discover a manifest there instead of being a no-op.
+        import contextlib
+        import io
+        import sys
+
+        ws = self.root / "ws"
+        ws.mkdir()
+        (ws / "app.c").write_text("", encoding="latin-1")
+        manifest = {
+            "version": 1,
+            "device": "PIC16F1509",
+            "compiler": str(self.root / "CC5X.EXE"),
+            "runner": None,
+            "header": {"mode": "generated", "path": "gen/16F1509.H"},
+            "config_source": "app.c",
+            "main_source": "app.c",
+            "build_options": [],
+            "editions": {"production": {"config": {}, "build_options": []}},
+        }
+        (ws / "setcc-native.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        argv = ["prog", "artifacts", "--workspace-root", str(ws), "--json"]
+        buf = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+            rc = build.main()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertTrue(payload["ok"])
+        # Discovered the manifest and searched its main-source dir (not standalone error).
+        self.assertEqual(payload["search_dir"], str(ws))
+
+    def test_workspace_root_without_manifest_stays_standalone(self) -> None:
+        # No manifest under the workspace root -> stay in standalone mode, not a crash.
+        import contextlib
+        import io
+        import sys
+
+        with tempfile.TemporaryDirectory() as empty:
+            empty_root = Path(empty).resolve()
+            (empty_root / "data").mkdir()
+            argv = [
+                "prog", "artifacts", "--workspace-root", str(empty_root),
+                "--dir", str(empty_root / "data"), "--json",
+            ]
+            buf = io.StringIO()
+            with unittest.mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                rc = build.main()
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["search_dir"], str(empty_root / "data"))
+
+    def test_parser_accepts_workspace_root_on_project_command(self) -> None:
+        parser = build.build_parser()
+        args = parser.parse_args(
+            ["project-show", "--workspace-root", str(self.sub), "--json"]
+        )
+        self.assertEqual(args.workspace_root, str(self.sub))
+        self.assertEqual(args.project, "setcc-native.json")
+
+
 if __name__ == "__main__":
     unittest.main()

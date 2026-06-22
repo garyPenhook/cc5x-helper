@@ -1036,13 +1036,13 @@ class ProjectTab(QWidget):
         self.main_source_edit = QLineEdit()
         self.config_source_edit = QLineEdit()
         project_form.addRow("Device", self.device_edit)
-        project_form.addRow("Compiler", self.compiler_edit)
-        project_form.addRow("Runner", self.runner_edit)
-        project_form.addRow("MPLAB Root", self.mplab_root_edit)
+        project_form.addRow("Compiler", self._browse_row(self.compiler_edit, self.browse_compiler))
+        project_form.addRow("Runner", self._browse_row(self.runner_edit, self.browse_runner))
+        project_form.addRow("MPLAB Root", self._browse_row(self.mplab_root_edit, self.browse_mplab_root))
         project_form.addRow("Header Mode", self.header_mode_combo)
-        project_form.addRow("Header Path", self.header_path_edit)
-        project_form.addRow("Main Source", self.main_source_edit)
-        project_form.addRow("Config Source", self.config_source_edit)
+        project_form.addRow("Header Path", self._browse_row(self.header_path_edit, self.browse_header_path))
+        project_form.addRow("Main Source", self._browse_row(self.main_source_edit, self.browse_main_source))
+        project_form.addRow("Config Source", self._browse_row(self.config_source_edit, self.browse_config_source))
         left_layout.addWidget(project_group)
 
         project_buttons = QHBoxLayout()
@@ -1178,6 +1178,133 @@ class ProjectTab(QWidget):
             self.project_path_edit.setText(path)
             self.load_project()
 
+    def _browse_row(self, line_edit: QLineEdit, handler) -> QWidget:
+        """Wrap a path field with a 'Browse' button so the user can pick it from a dialog
+        instead of hand-typing it. The button is intentionally NOT build-locked: editing a
+        field mid-build is safe because `_run_build` reloads project state from disk
+        (`load_project_and_edition`) and captures its command locally before launching, so
+        the live fields it never reads cannot perturb an in-flight build (no different from
+        the line edits, which also stay editable during a build)."""
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(line_edit, 1)
+        button = QPushButton("Browse")
+        button.clicked.connect(handler)
+        row.addWidget(button)
+        return container
+
+    def _project_dir(self) -> "Path | None":
+        """Directory the manifest lives in, used to relativize/anchor browsed paths.
+
+        Returns None when the project-path field is empty: an empty string is not a
+        manifest path, and `Path("").resolve()` is the cwd, so taking its `.parent` would
+        silently anchor browsing to an unrelated directory (the parent of the cwd). With
+        no manifest location, callers store absolute paths and open dialogs at home.
+        """
+        text = self.project_path_edit.text().strip()
+        if not text:
+            return None
+        return Path(text).expanduser().resolve().parent
+
+    def _display_path(self, chosen: str, *, relativize: bool) -> str:
+        """Render a browsed path for storage in the manifest.
+
+        Only the fields the build resolves with ``project_path_join`` (main source, config
+        source, header path) may be stored **manifest-relative** (``relativize=True``) — that
+        keeps the manifest portable. The compiler, runner, and MPLAB-root fields are NOT
+        manifest-relative: the CLI/extension resolve them against the process CWD (or use them
+        verbatim), so a manifest-relative value there would misresolve outside the GUI; those
+        are always stored absolute (``relativize=False``).
+        """
+        path = Path(chosen).expanduser()
+        if relativize:
+            project_dir = self._project_dir()
+            if project_dir is not None:
+                try:
+                    return str(path.resolve().relative_to(project_dir))
+                except (ValueError, OSError):
+                    pass
+        return str(path)
+
+    def _browse_start(self, line_edit: QLineEdit) -> str:
+        """Open each file dialog at the field's current value (resolved against the
+        manifest dir for relative paths), or the manifest dir / home when it is empty."""
+        project_dir = self._project_dir()
+        text = line_edit.text().strip()
+        if text:
+            candidate = Path(text).expanduser()
+            if not candidate.is_absolute():
+                candidate = (project_dir or Path.home()) / candidate
+            return str(candidate)
+        return str(project_dir or Path.home())
+
+    def _browse_into(
+        self,
+        line_edit: QLineEdit,
+        title: str,
+        *,
+        file_filter: str = "All Files (*)",
+        save: bool = False,
+        relativize: bool = False,
+    ) -> None:
+        """Shared file-picker body for the path fields: open at the field's current value,
+        and on a confirmed choice store it. ``relativize=True`` (only the manifest-relative
+        source/header fields) stores a path inside the project dir relative to the manifest;
+        toolchain fields keep the absolute path. ``save=True`` uses a save dialog so a
+        not-yet-existing target (e.g. a generated header) can be named."""
+        start = self._browse_start(line_edit)
+        if save:
+            chosen, _ = QFileDialog.getSaveFileName(self, title, start, file_filter)
+        else:
+            chosen, _ = QFileDialog.getOpenFileName(self, title, start, file_filter)
+        if chosen:
+            line_edit.setText(self._display_path(chosen, relativize=relativize))
+
+    _C_SOURCE_FILTER = "C Source (*.c *.C);;All Files (*)"
+
+    @gui_action
+    def browse_compiler(self) -> None:
+        # Toolchain path: absolute (CLI/extension resolve it against CWD, not the manifest).
+        self._browse_into(self.compiler_edit, "Select CC5X Compiler")
+
+    @gui_action
+    def browse_runner(self) -> None:
+        # Toolchain wrapper: absolute (resolved against CWD / used verbatim outside the GUI).
+        self._browse_into(self.runner_edit, "Select Runner Executable")
+
+    @gui_action
+    def browse_mplab_root(self) -> None:
+        # Directory dialog: getExistingDirectory returns a bare string (not a tuple). Stored
+        # absolute — mplab_root is a metadata override resolved against CWD, not the manifest.
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select MPLAB Root", self._browse_start(self.mplab_root_edit)
+        )
+        if chosen:
+            self.mplab_root_edit.setText(self._display_path(chosen, relativize=False))
+
+    @gui_action
+    def browse_header_path(self) -> None:
+        self._browse_into(
+            self.header_path_edit,
+            "Select Header File",
+            file_filter="Header Files (*.h *.H);;All Files (*)",
+            save=True,
+            relativize=True,
+        )
+
+    @gui_action
+    def browse_main_source(self) -> None:
+        self._browse_into(
+            self.main_source_edit, "Select Main Source", file_filter=self._C_SOURCE_FILTER, relativize=True
+        )
+
+    @gui_action
+    def browse_config_source(self) -> None:
+        self._browse_into(
+            self.config_source_edit, "Select Config Source", file_filter=self._C_SOURCE_FILTER, relativize=True
+        )
+
     @gui_action
     def new_project(self) -> None:
         # Let the user pick WHERE the new project lives via a Save-As dialog (browse to any
@@ -1194,7 +1321,21 @@ class ProjectTab(QWidget):
             return
         project_path = Path(chosen)
         if project_path.suffix == "":
+            # getSaveFileName confirmed overwrite for the *typed* name, not for the
+            # ".json"-appended one — so an existing <name>.json would be clobbered silently.
+            # Re-confirm explicitly before writing over it.
             project_path = project_path.with_suffix(".json")
+            if project_path.exists():
+                answer = QMessageBox.question(
+                    self,
+                    "cc5x-helper",
+                    f"{project_path} already exists. Overwrite it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.output.write_text(f"cancelled: {project_path} exists, not overwritten")
+                    return
         self.project_path_edit.setText(str(project_path))
 
         main_source = self.main_source_edit.text().strip() or "app.c"

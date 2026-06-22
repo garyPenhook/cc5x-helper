@@ -691,6 +691,60 @@ def project_path_join(project_path: Path, value: str) -> Path:
     return (project_path.parent / path).resolve()
 
 
+DEFAULT_PROJECT_MANIFEST = "setcc-native.json"
+
+
+def resolve_project_manifest(
+    project: str,
+    workspace_root: str | None = None,
+    *,
+    discover: bool = True,
+) -> Path:
+    """Resolve a ``--project`` value to a concrete manifest path.
+
+    Precedence (highest first), so an explicit choice always wins over discovery:
+
+    1. An **absolute** ``--project`` path is used verbatim.
+    2. A relative ``--project`` that carries a **directory component** (e.g.
+       ``sub/setcc-native.json``) is anchored to the workspace root / current dir.
+    3. For a **bare filename** (the default ``setcc-native.json``), when ``discover`` is set
+       (every read/edit command): ``$CC5X_HELPER_PROJECT`` is honoured if set — one env var
+       pins the manifest for both the CLI and the GUI (which already reads it) — otherwise
+       the file is located git-style by walking up from the workspace root (or the current
+       dir), so the command works from any project subdirectory; failing that, the
+       conventional ``<root>/<name>`` is returned so a not-found error points there.
+
+    ``discover=False`` (used by ``project-init``) neither pins via the env var nor walks up:
+    a new manifest is created at the anchored ``<root>/<name>`` rather than resolving onto an
+    existing ancestor's — or a pinned, possibly unrelated — manifest.
+    """
+    start = Path(workspace_root).expanduser() if workspace_root else Path.cwd()
+    try:
+        start = start.resolve()
+    except OSError:  # pragma: no cover - resolve() is non-strict, but be defensive
+        pass
+
+    candidate = Path(project).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    # A path carrying a directory component is taken literally (relative to the root).
+    if candidate.parent != Path("."):
+        return start / candidate
+
+    # Bare filename. Only discovery (read/edit commands) honours the env pin, then walks up;
+    # project-init (discover=False) does neither, so a new manifest lands at <root>/<name>.
+    name = candidate.name
+    if discover:
+        env_override = os.environ.get("CC5X_HELPER_PROJECT")
+        if env_override:
+            return Path(env_override).expanduser()
+        for base in [start, *start.parents]:
+            found = base / name
+            if found.is_file():
+                return found
+    return start / name
+
+
 def project_metadata(project) -> tuple[dict[str, str | None], object]:
     result = find_device_metadata(project.device, project.mplab_root)
     metadata = load_device_metadata(
@@ -2080,6 +2134,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # Shared by every project-manifest command: where to resolve/discover --project from.
+    workspace_parent = argparse.ArgumentParser(add_help=False)
+    workspace_parent.add_argument(
+        "--workspace-root",
+        help=(
+            "Directory used to resolve/discover the --project manifest (default: current "
+            "directory). A bare --project name (the default setcc-native.json) is found by "
+            "walking up from here, so a command works from any project subdirectory."
+        ),
+    )
+
     probe = subparsers.add_parser("probe", help="Locate MPLAB X .ini/.cfgdata files for a device.")
     probe.add_argument("--device", required=True)
     probe.add_argument("--mplab-root")
@@ -2117,6 +2182,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_init = subparsers.add_parser(
         "project-init",
+        parents=[workspace_parent],
         help="Create a checked-in setcc-native.json manifest instead of relying on setcc.pxk state.",
     )
     project_init.add_argument("--project", default="setcc-native.json")
@@ -2137,6 +2203,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_validate = subparsers.add_parser(
         "project-validate",
+        parents=[workspace_parent],
         help="Validate a setcc-native.json manifest.",
     )
     project_validate.add_argument("--project", default="setcc-native.json")
@@ -2145,6 +2212,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_edit = subparsers.add_parser(
         "project-edit",
+        parents=[workspace_parent],
         help="Update top-level fields in a setcc-native.json manifest.",
     )
     project_edit.add_argument("--project", default="setcc-native.json")
@@ -2162,6 +2230,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_edit_edition = subparsers.add_parser(
         "project-edit-edition",
+        parents=[workspace_parent],
         help="Create, copy, or delete editions in a setcc-native.json manifest.",
     )
     project_edit_edition.add_argument("--project", default="setcc-native.json")
@@ -2172,6 +2241,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_set_config = subparsers.add_parser(
         "project-set-config",
+        parents=[workspace_parent],
         help="Set or remove config symbol values for a named project edition.",
     )
     project_set_config.add_argument("--project", default="setcc-native.json")
@@ -2183,6 +2253,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_set_build_options = subparsers.add_parser(
         "project-set-build-options",
+        parents=[workspace_parent],
         help="Replace the build option list for a named project edition.",
     )
     project_set_build_options.add_argument("--project", default="setcc-native.json")
@@ -2192,6 +2263,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_generate_header = subparsers.add_parser(
         "project-generate-header",
+        parents=[workspace_parent],
         help="Synthesize and write the device header for a generated-mode project.",
     )
     project_generate_header.add_argument("--project", default="setcc-native.json")
@@ -2200,6 +2272,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     intellisense = subparsers.add_parser(
         "intellisense",
+        parents=[workspace_parent],
         help="Generate the editor-only IntelliSense shim + compile_commands.json for a project.",
     )
     intellisense.add_argument("--project", default="setcc-native.json")
@@ -2214,6 +2287,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",
+        parents=[workspace_parent],
         help="List the editions stored in a setcc-native.json manifest.",
     )
     project_list_editions.add_argument("--project", default="setcc-native.json")
@@ -2222,6 +2296,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_show = subparsers.add_parser(
         "project-show",
+        parents=[workspace_parent],
         help="Show the stored project manifest or one edition from it.",
     )
     project_show.add_argument("--project", default="setcc-native.json")
@@ -2283,6 +2358,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = subparsers.add_parser(
         "sync-config",
+        parents=[workspace_parent],
         help="Update or append a managed config block in a C source file.",
     )
     sync.add_argument("--project")
@@ -2296,6 +2372,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     build = subparsers.add_parser(
         "build",
+        parents=[workspace_parent],
         help="Run CC5X directly from Linux instead of going through the SETCC GUI.",
     )
     build.add_argument("--project")
@@ -2315,6 +2392,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     artifacts = subparsers.add_parser(
         "artifacts",
+        parents=[workspace_parent],
         help="List CC5X build artifacts (.hex/.asm/.occ/.var/.fcs/.cpr/.cod/.cof) for a project.",
     )
     artifacts.add_argument("--project", help="Manifest; artifacts are searched under its main source dir.")
@@ -2324,6 +2402,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     program = subparsers.add_parser(
         "program",
+        parents=[workspace_parent],
         help="Program/erase/verify/blank-check a device via MPLAB IPECMD (PICkit 4/5, etc.).",
     )
     program.add_argument(
@@ -2358,6 +2437,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     vscode_tasks = subparsers.add_parser(
         "vscode-tasks",
+        parents=[workspace_parent],
         help="Generate/merge .vscode/tasks.json build + program tasks from a project manifest.",
     )
     vscode_tasks.add_argument("--project", required=True, help="setcc-native.json manifest.")
@@ -2395,6 +2475,35 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    # Resolve --project (discover setcc-native.json by walking up from --workspace-root /
+    # cwd) once, centrally, so every project command shares one resolution policy. Skip the
+    # upward walk for project-init, which creates a manifest at the anchored location rather
+    # than binding onto an existing ancestor's. Only a *truthy* --project is resolved: an
+    # empty string keeps the falsy "standalone, no manifest" mode the optional-project
+    # commands (build/sync-config/artifacts/program) rely on. expanduser() can raise
+    # RuntimeError (e.g. an unknown ``~user``), so convert it to a clean error here — the
+    # try/except below wraps only args.func.
+    try:
+        if getattr(args, "project", None):
+            args.project = str(
+                resolve_project_manifest(
+                    args.project,
+                    getattr(args, "workspace_root", None),
+                    discover=(getattr(args, "command", None) != "project-init"),
+                )
+            )
+        elif getattr(args, "workspace_root", None) and hasattr(args, "project"):
+            # Optional-project commands (build/sync-config/artifacts/program) have no
+            # --project default, so an explicit --workspace-root would otherwise be a no-op.
+            # Treat it as a request to discover a manifest there; fall back to standalone
+            # mode (project stays None) when none is found, so non-project use still works.
+            discovered = resolve_project_manifest(
+                DEFAULT_PROJECT_MANIFEST, args.workspace_root
+            )
+            if discovered.is_file():
+                args.project = str(discovered)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise SystemExit(f"error: {exc}")
     try:
         return args.func(args)
     except (ValueError, OSError) as exc:

@@ -1,0 +1,8 @@
+/*
+ * Managed by cc5x_setcc_native.py from synthetic PIC16FSYN1
+ * Update this block with the tool instead of editing it manually.
+ */
+// START_CONFIG_SETCC_5X.
+#pragma config BBSIZE = 512 // Boot Block Size (Words) 512
+#pragma config FOSC = INTOSC // internal oscillator
+// END_CONFIG_SETCC_5X.
