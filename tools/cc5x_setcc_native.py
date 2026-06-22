@@ -1075,30 +1075,87 @@ def cmd_sync_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_build(args: argparse.Namespace) -> int:
-    if args.project:
-        project_path, project, edition = load_project_and_edition(args.project, args.edition)
-        build_errors = project_build_readiness_errors(project_path, project)
-        if build_errors:
-            raise SystemExit(
-                f"project is not ready to build {project_path}:\n- "
-                + "\n- ".join(build_errors)
-            )
-        header_path = ensure_project_header(project_path, project)
-        runner = shlex.split(project.runner) if project.runner else []
-        source_path = project_path_join(project_path, project.main_source)
-        options = build_options_for_project(project, edition, header_path)
-        command = build_command(
-            compiler=project.compiler,
-            main_file=str(source_path),
-            options=options,
-            runner=runner,
+# CC5X emits diagnostics as "Error <file> <line>: <msg>" / "Warning <file> <line>: <msg>".
+# This mirrors the extension's `$cc5x` problem matcher and src/diagnostics.ts so the
+# structured (`--json-diagnostics`) form agrees with the text parsing on both sides.
+CC5X_DIAGNOSTIC_RE = re.compile(r"^(Error|Warning)\s+(.+?)\s+(\d+):\s+(.*)$")
+
+
+def parse_cc5x_diagnostics(text: str) -> list[dict[str, object]]:
+    """Normalize CC5X build output into structured diagnostics.
+
+    Returns one entry per matched line: ``severity`` ("error"/"warning"), ``file``, ``line``
+    (kept 1-based as CC5X reports it; consumers adjust), and ``message``. Non-diagnostic
+    lines (e.g. "Warnings (level 1-3): ...") are ignored, matching the contributed matcher.
+    """
+    diagnostics: list[dict[str, object]] = []
+    for raw in text.splitlines():
+        match = CC5X_DIAGNOSTIC_RE.match(raw.strip())
+        if not match:
+            continue
+        severity, file, line, message = match.groups()
+        diagnostics.append(
+            {"severity": severity.lower(), "file": file, "line": int(line), "message": message}
         )
-        print("command:", shlex.join(command))
-        if args.dry_run:
-            return 0
-        completed = subprocess.run(command, cwd=source_path.parent)
+    return diagnostics
+
+
+def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace) -> int:
+    """Run (or dry-run) a build command, emitting text or structured-diagnostics JSON.
+
+    With ``--json-diagnostics`` the only thing on stdout is the JSON payload
+    (``ok``/``returncode``/``command``/``diagnostics``/``stdout``/``stderr``), so the
+    extension can parse it; the exit code is the compiler's return code (nonzero on failure).
+    Without it, the command streams through as before.
+    """
+    json_mode = getattr(args, "json_diagnostics", False)
+    if args.dry_run:
+        if json_mode:
+            print(json.dumps({"ok": True, "dry_run": True, "command": command, "diagnostics": []}, indent=2))
+        else:
+            print("command:", shlex.join(command))
+        return 0
+    if json_mode:
+        completed = subprocess.run(command, cwd=run_cwd, capture_output=True, text=True)
+        combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+        payload = {
+            "ok": completed.returncode == 0,
+            "returncode": completed.returncode,
+            "command": command,
+            "diagnostics": parse_cc5x_diagnostics(combined),
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+        print(json.dumps(payload, indent=2))
         return completed.returncode
+    print("command:", shlex.join(command))
+    completed = subprocess.run(command, cwd=run_cwd)
+    return completed.returncode
+
+
+def _prepare_project_build(args: argparse.Namespace) -> tuple[list[str], object]:
+    """Resolve the build command + working dir for a manifest project (may raise SystemExit)."""
+    project_path, project, edition = load_project_and_edition(args.project, args.edition)
+    build_errors = project_build_readiness_errors(project_path, project)
+    if build_errors:
+        raise SystemExit(
+            f"project is not ready to build {project_path}:\n- " + "\n- ".join(build_errors)
+        )
+    header_path = ensure_project_header(project_path, project)
+    runner = shlex.split(project.runner) if project.runner else []
+    source_path = project_path_join(project_path, project.main_source)
+    options = build_options_for_project(project, edition, header_path)
+    command = build_command(
+        compiler=project.compiler,
+        main_file=str(source_path),
+        options=options,
+        runner=runner,
+    )
+    return command, source_path.parent
+
+
+def _prepare_standalone_build(args: argparse.Namespace) -> tuple[list[str], object]:
+    """Resolve the build command + working dir for an explicit --compiler/--main build."""
     if not args.compiler or not args.main:
         raise SystemExit("--compiler and --main are required unless --project is used")
     runner = shlex.split(args.runner) if args.runner else []
@@ -1108,13 +1165,29 @@ def cmd_build(args: argparse.Namespace) -> int:
         options=args.option or [],
         runner=runner,
     )
-    print("command:", shlex.join(command))
-    if args.dry_run:
-        return 0
-    if args.cwd and not Path(args.cwd).is_dir():
+    # Only a real (non-dry-run) build needs the cwd to exist; --dry-run stays a pure preview.
+    if args.cwd and not args.dry_run and not Path(args.cwd).is_dir():
         raise SystemExit(f"--cwd directory does not exist: {args.cwd}")
-    completed = subprocess.run(command, cwd=args.cwd or None)
-    return completed.returncode
+    return command, args.cwd or None
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    try:
+        if args.project:
+            command, run_cwd = _prepare_project_build(args)
+        else:
+            command, run_cwd = _prepare_standalone_build(args)
+    except SystemExit as exc:
+        # --json-diagnostics promises parseable JSON on stdout; honor the contract for
+        # launch failures (not-ready project, missing/mismatched header, bad cwd) too,
+        # mirroring `program --json` rather than dumping a bare message to stderr.
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(
+                {"ok": False, "error": {"kind": "build_not_ready", "message": str(exc)}}, indent=2
+            ))
+            return 1
+        raise
+    return _finish_build(command, run_cwd, args)
 
 
 def _emit_program_payload(payload: dict[str, object], as_json: bool) -> None:
@@ -2116,6 +2189,11 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--runner", help='Optional launcher, for example: "wine"')
     build.add_argument("--cwd")
     build.add_argument("--dry-run", action="store_true")
+    build.add_argument(
+        "--json-diagnostics",
+        action="store_true",
+        help="Emit a JSON payload with CC5X output normalized to structured diagnostics.",
+    )
     build.set_defaults(func=cmd_build)
 
     program = subparsers.add_parser(

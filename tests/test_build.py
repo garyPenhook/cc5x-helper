@@ -385,6 +385,87 @@ def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
     return symbol
 
 
+class Cc5xDiagnosticsParseTests(unittest.TestCase):
+    """Phase 1: `build --json-diagnostics` normalizes CC5X output to structured diagnostics."""
+
+    def test_parses_error_and_warning(self) -> None:
+        text = "Error main.c 42: No ';' found\nWarning regs.h 17: variable not used\n"
+        diags = build.parse_cc5x_diagnostics(text)
+        self.assertEqual(diags[0], {"severity": "error", "file": "main.c", "line": 42, "message": "No ';' found"})
+        self.assertEqual(diags[1]["severity"], "warning")
+        self.assertEqual(diags[1]["line"], 17)
+
+    def test_ignores_non_diagnostic_lines(self) -> None:
+        # Must NOT match the summary/option lines (mirrors the $cc5x matcher).
+        text = "Warnings (level 1-3): 5\nError options: see manual\nCC5X Version 3.8C\n"
+        self.assertEqual(build.parse_cc5x_diagnostics(text), [])
+
+    def test_dry_run_json_payload(self) -> None:
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler="/c/CC5X.EXE", main="main.c",
+            option=None, runner=None, cwd=None, dry_run=True, json_diagnostics=True,
+        )
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_build(args)
+        self.assertEqual(rc, 0)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["diagnostics"], [])
+        self.assertIn("/c/CC5X.EXE", payload["command"])
+
+    def test_run_json_payload_captures_diagnostics(self) -> None:
+        fake = types.SimpleNamespace(returncode=1, stdout="Error main.c 9: oops\n", stderr="")
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler="/c/CC5X.EXE", main="main.c",
+            option=None, runner=None, cwd=None, dry_run=False, json_diagnostics=True,
+        )
+        with unittest.mock.patch.object(build.subprocess, "run", return_value=fake) as run, \
+             unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_build(args)
+        self.assertEqual(rc, 1)
+        self.assertTrue(run.call_args.kwargs.get("capture_output"))
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], 1)
+        self.assertEqual(payload["diagnostics"][0]["message"], "oops")
+
+
+class BuildJsonDiagnosticsErrorTests(unittest.TestCase):
+    """--json-diagnostics must keep its JSON contract even when the build can't launch."""
+
+    def test_launch_failure_emits_json_error(self) -> None:
+        # An explicit --compiler/--main is missing -> SystemExit in prep -> JSON error, exit 1.
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler=None, main=None,
+            option=None, runner=None, cwd=None, dry_run=False, json_diagnostics=True,
+        )
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_build(args)
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["kind"], "build_not_ready")
+
+    def test_launch_failure_without_json_still_raises(self) -> None:
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler=None, main=None,
+            option=None, runner=None, cwd=None, dry_run=False, json_diagnostics=False,
+        )
+        with self.assertRaises(SystemExit):
+            build.cmd_build(args)
+
+    def test_dry_run_preview_skips_cwd_existence_check(self) -> None:
+        # --dry-run is a pure preview: a not-yet-created --cwd must not abort it.
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler="/c/CC5X.EXE", main="main.c",
+            option=None, runner=None, cwd="/no/such/dir", dry_run=True, json_diagnostics=False,
+        )
+        with unittest.mock.patch("builtins.print"):
+            rc = build.cmd_build(args)
+        self.assertEqual(rc, 0)
+
+
 class BuildCommandTests(unittest.TestCase):
     """Audit #3: runner is a `{compiler}` command template, not filename-coupled."""
 
