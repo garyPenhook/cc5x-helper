@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import configparser
 import json
-import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
+
+# Pack `.PIC` files are XML pulled from downloaded/third-party `.atpack` archives, i.e.
+# untrusted input. The stdlib ElementTree is vulnerable to entity-expansion ("billion
+# laughs") and external-entity attacks, so parse through defusedxml instead.
+from defusedxml.ElementTree import fromstring as _xml_fromstring
 
 from .packs import read_text_reference
 
@@ -197,7 +201,7 @@ def parse_cfgdata_text(text: str) -> list[ConfigWord]:
 
 
 def parse_pic_xml_text(text: str) -> PicSummary:
-    root = ET.fromstring(text)
+    root = _xml_fromstring(text)
     arch = root.attrib.get("{http://crownking/edc}arch")
     procid = root.attrib.get("{http://crownking/edc}procid")
     dsid = root.attrib.get("{http://crownking/edc}dsid")
