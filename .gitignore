@@ -33,3 +33,6 @@ cc5x-38.pdf
 
 .cxoffice/
 .wine/
+
+# Machine-specific project manifest (absolute compiler/runner paths); not portable.
+setcc-native.json

@@ -1,8 +1,38 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .picmeta import DeviceMetadata, IniSfr, IniSfrField, MemoryRange
+
+
+# Names/descriptions emitted into the generated header originate from untrusted pack
+# metadata. Without sanitization a crafted name (whitespace, a newline, or `//`/`*/`
+# sequences) could inject arbitrary text into the C header that is later compiled.
+_NON_IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z_]")
+
+
+def _safe_identifier(name: str) -> str:
+    """Coerce a pack-derived token into a valid C identifier.
+
+    Legitimate SFR/bit/config names are already valid identifiers and pass through
+    unchanged; anything else (spaces, newlines, punctuation) is replaced so it cannot
+    break out of the surrounding declaration or pragma.
+    """
+    cleaned = _NON_IDENTIFIER_RE.sub("_", name.strip())
+    if cleaned and cleaned[0].isdigit():
+        cleaned = f"_{cleaned}"
+    return cleaned or "_"
+
+
+def _safe_comment(text: str) -> str:
+    """Collapse untrusted text to a single line safe inside a ``//`` comment.
+
+    Backslashes are stripped as well as newlines: a trailing backslash would splice
+    the following generated line into the comment (C line-continuation runs before
+    comments are recognized), which could swallow a subsequent #pragma/#endif.
+    """
+    return " ".join(text.replace("\\", " ").split())
 
 
 ENHANCED_PREDEFINED_REGISTERS = {
@@ -55,7 +85,8 @@ def _render_config_line(word_index: int, word, setting, value) -> str:
     resolved_word = (word.default & ~setting.mask) | value.value
     return (
         f"#pragma config /{word_index} 0x{resolved_word:0X} "
-        f"{setting.name} = {value.name} // {value.description}"
+        f"{_safe_identifier(setting.name)} = {_safe_identifier(value.name)} "
+        f"// {_safe_comment(value.description)}"
     )
 
 
@@ -123,13 +154,11 @@ def _ram_limit(metadata: DeviceMetadata) -> int | None:
     if not base_ranges:
         return None
     current_max = max(item.end for item in base_ranges)
-    changed = True
-    while changed:
-        changed = False
-        for item in metadata.common_ranges:
-            if item.start <= current_max + 1 and item.end > current_max:
-                current_max = item.end
-                changed = True
+    # Sort COMMON ranges by start so contiguous ranges merge regardless of the order
+    # they appear in the pack metadata; a single ascending pass then suffices.
+    for item in sorted(metadata.common_ranges, key=lambda r: r.start):
+        if item.start <= current_max + 1 and item.end > current_max:
+            current_max = item.end
     return current_max
 
 
@@ -140,7 +169,8 @@ def _render_chip_pragma(metadata: DeviceMetadata) -> list[str]:
     ram_origin = metadata.ram_ranges[0].start if metadata.ram_ranges else 0
     ram_limit = _ram_limit(metadata)
     line = (
-        f"#pragma chip {metadata.device}, core {profile.core}, code {code_size}, ram {ram_origin}"
+        f"#pragma chip {_safe_identifier(metadata.device)}, core {profile.core}, "
+        f"code {code_size}, ram {ram_origin}"
     )
     if ram_limit is not None:
         line += f" : 0x{ram_limit:X}"
@@ -270,10 +300,11 @@ def _render_sfr_section(metadata: DeviceMetadata) -> list[str]:
     use_pragma_char = (metadata.ini_arch or "").upper() == "PIC14"
     lines: list[str] = []
     for sfr in ordered:
+        safe_name = _safe_identifier(sfr.name)
         if use_pragma_char:
-            lines.append(f"#pragma char {sfr.name} @ 0x{sfr.address:X}")
+            lines.append(f"#pragma char {safe_name} @ 0x{sfr.address:X}")
         else:
-            lines.append(f"char {sfr.name} @ 0x{sfr.address:X};")
+            lines.append(f"char {safe_name} @ 0x{sfr.address:X};")
         for alias in metadata.sfrs:
             if alias.address != sfr.address or alias.width != 8 or alias.name == sfr.name:
                 continue
@@ -281,10 +312,11 @@ def _render_sfr_section(metadata: DeviceMetadata) -> list[str]:
                 continue
             if not _should_emit_alias(metadata, sfr.name, alias.name):
                 continue
+            safe_alias = _safe_identifier(alias.name)
             if use_pragma_char:
-                lines.append(f"#pragma char {alias.name} @ {sfr.name}")
+                lines.append(f"#pragma char {safe_alias} @ {safe_name}")
             else:
-                lines.append(f"char {alias.name} @ {sfr.name};")
+                lines.append(f"char {safe_alias} @ {safe_name};")
         lines.append("")
     if lines and not lines[-1]:
         lines.pop()
@@ -321,7 +353,7 @@ def _should_suppress_byte_bitfields(register_name: str, fields: list[IniSfrField
         return False
     expected = {f"{register_name}{bit}" for bit in range(8)}
     names = {field.name for field in width1}
-    return names and names.issubset(expected)
+    return bool(names) and names.issubset(expected)
 
 
 def _canonical_bit_names(raw_name: str) -> list[str]:
@@ -433,14 +465,16 @@ def _render_bit_declaration(
     bit_position: int,
     use_pragma_bit: bool,
 ) -> str:
+    safe_name = _safe_identifier(name)
+    safe_register = _safe_identifier(register_name)
     if use_pragma_bit:
         target = (
             f"/*OPTION_REG*/0x{address:02X}.{bit_position}"
             if register_name == "OPTION_REG"
-            else f"{register_name}.{bit_position}"
+            else f"{safe_register}.{bit_position}"
         )
-        return f"#pragma bit {name} @ {target}"
-    return f"bit {name} @ {register_name}.{bit_position};"
+        return f"#pragma bit {safe_name} @ {target}"
+    return f"bit {safe_name} @ {safe_register}.{bit_position};"
 
 
 def render_full_header(metadata: DeviceMetadata) -> str:
