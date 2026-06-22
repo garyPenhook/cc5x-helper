@@ -1138,6 +1138,34 @@ class ValidateGeneratedHeadersTests(unittest.TestCase):
         self.assertEqual(result.header_path, str(header))
 
 
+class InstallRootDefaultsTests(unittest.TestCase):
+    """Frozen-aware toolchain defaults (audit #8): a PyInstaller bundle must not point its
+    compiler default into the /tmp _MEIPASS extraction dir, and the runner default must not
+    be a hardcoded home path."""
+
+    def test_source_mode_root_is_repo_root(self) -> None:
+        with unittest.mock.patch.object(build.sys, "frozen", False, create=True):
+            root = build._install_root()
+        self.assertEqual(root, Path(build.__file__).resolve().parent.parent)
+
+    def test_frozen_onefile_in_dist_resolves_to_dir_above_dist(self) -> None:
+        # Binary ships at <root>/dist/<bin>; the root (with cc5x_paid/) is the dir above dist.
+        with unittest.mock.patch.object(build.sys, "frozen", True, create=True), \
+                unittest.mock.patch.object(build.sys, "executable", "/opt/app/dist/cc5x-helper"):
+            self.assertEqual(build._install_root(), Path("/opt/app"))
+
+    def test_frozen_binary_outside_dist_uses_executable_dir(self) -> None:
+        with unittest.mock.patch.object(build.sys, "frozen", True, create=True), \
+                unittest.mock.patch.object(build.sys, "executable", "/usr/local/bin/cc5x-helper"):
+            self.assertEqual(build._install_root(), Path("/usr/local/bin"))
+
+    def test_runner_default_has_no_hardcoded_home_path(self) -> None:
+        # Guard against re-introducing a machine-specific literal like /home/gary/...
+        import inspect
+
+        self.assertNotIn("/home/", inspect.getsource(build._runner_candidates))
+
+
 class ResolveProjectManifestTests(unittest.TestCase):
     """--workspace-root / default --project discovery for setcc-native.json."""
 

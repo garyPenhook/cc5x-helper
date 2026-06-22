@@ -103,10 +103,47 @@ END_MARKERS = {
     "5x": "END_CONFIG_SETCC_5X.",
     "8e": "END_CONFIG_SETCC_8E.",
 }
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _install_root() -> Path:
+    """Root of the tree that holds the bundled toolchain (``cc5x_paid/``, the runner).
+
+    Source checkout: the repo root is two levels above this module (``tools/``).
+    Frozen (PyInstaller ``--onefile``): ``__file__`` resolves *inside* the throwaway
+    ``_MEIPASS`` extraction dir (``/tmp/_MEIxxxx/...``), which never contains ``cc5x_paid``,
+    so the defaults must be resolved next to the **executable** instead. The repo ships the
+    binary in ``<root>/dist/``, so the root is the dir above it (audit #8 — a bundle must not
+    point its compiler default at ``/tmp``).
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        return exe_dir.parent if exe_dir.name == "dist" else exe_dir
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_ROOT = _install_root()
 VALIDATION_ROOT = PROJECT_ROOT / "validation" / "generated"
-DEFAULT_RUNNER = Path("/home/gary/apps/cc5x-run.sh")
 DEFAULT_COMPILER = PROJECT_ROOT / "cc5x_paid" / "CC5X" / "CC5X.EXE"
+
+
+def _runner_candidates() -> list[Path]:
+    """Install-relative locations of the CrossOver/Wine wrapper, newest-preference first.
+
+    No hardcoded home path (audit #8): the repo historically ships ``cc5x-run.sh`` one level
+    above the checkout, so ``PROJECT_ROOT.parent`` discovers it on the dev machine while
+    staying portable to any install layout. ``$CC5X_RUNNER`` overrides this everywhere it is
+    consumed (build / doctor), so this is only the no-env fallback.
+    """
+    return [PROJECT_ROOT / "cc5x-run.sh", PROJECT_ROOT.parent / "cc5x-run.sh"]
+
+
+def default_runner() -> Path:
+    """First existing runner candidate, or the first candidate as a points-somewhere fallback."""
+    candidates = _runner_candidates()
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+
+
+DEFAULT_RUNNER = default_runner()
 DEFAULT_CROSSOVER_BINARIES = [
     Path("/opt/cxoffice/bin/cxrun"),
     Path("/opt/cxoffice/bin/wine"),

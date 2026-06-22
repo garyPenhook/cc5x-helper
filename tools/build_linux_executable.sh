@@ -11,10 +11,14 @@ case "${MODE}" in
     OUTPUT_NAME="cc5x-helper"
     ENTRYPOINT="tools/cc5x_setcc_native.py"
     EXTRA_ARGS=()
+    UV_EXTRA_ARGS=()
     ;;
   gui)
     OUTPUT_NAME="cc5x-helper-gui"
     ENTRYPOINT="tools/cc5x_helper_gui.py"
+    # PyQt6 is the optional 'gui' extra; without it uv builds in an env where the GUI
+    # entrypoint's `import PyQt6` is unresolved and PyInstaller bundles no Qt runtime.
+    UV_EXTRA_ARGS=(--extra gui)
     EXTRA_ARGS=(
       --windowed
       --exclude-module pygame
@@ -62,7 +66,7 @@ esac
 
 cd "${ROOT_DIR}"
 
-uv run --python "${PYTHON_SELECTOR}" --with pyinstaller pyinstaller \
+uv run --python "${PYTHON_SELECTOR}" "${UV_EXTRA_ARGS[@]}" --with pyinstaller pyinstaller \
   --onefile \
   --name "${OUTPUT_NAME}" \
   --paths tools \
