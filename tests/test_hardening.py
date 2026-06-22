@@ -1,6 +1,7 @@
 """Regression tests for pack-parsing / header-generation hardening."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -33,10 +34,19 @@ def test_read_text_file_capped_rejects_oversized(tmp_path: Path) -> None:
         _read_text_file_capped(big, "utf-8", max_bytes=10)
 
 
-def test_read_text_file_capped_rejects_non_regular_file(tmp_path: Path) -> None:
-    missing = tmp_path / "nope.txt"
+def test_read_text_file_capped_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        _read_text_file_capped(tmp_path / "nope.txt", "utf-8")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo not available")
+def test_read_text_file_capped_rejects_fifo(tmp_path: Path) -> None:
+    # A FIFO substituted for the expected device file must be rejected (and the
+    # non-blocking open must not hang) rather than blocking on the read.
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
     with pytest.raises(ValueError, match="not a regular file"):
-        _read_text_file_capped(missing, "utf-8")
+        _read_text_file_capped(fifo, "utf-8")
 
 
 def test_read_text_reference_reads_plain_file(tmp_path: Path) -> None:
