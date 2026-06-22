@@ -310,3 +310,80 @@ def test_build_lock_buttons_toggle() -> None:
         assert all(button.isEnabled() for button in projects._build_lock_buttons)
     finally:
         app.quit()
+
+
+def test_gui_build_uses_main_source_directory_as_working_directory(tmp_path) -> None:
+    """GUI and CLI builds must resolve relative includes from the same directory."""
+    import json
+    import os
+    from unittest import mock
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    import cc5x_helper_gui
+
+    class Signal:
+        def connect(self, _handler) -> None:
+            pass
+
+    class FakeProcess:
+        last = None
+
+        def __init__(self, _parent) -> None:
+            FakeProcess.last = self
+            self.readyReadStandardOutput = Signal()
+            self.readyReadStandardError = Signal()
+            self.finished = Signal()
+            self.errorOccurred = Signal()
+            self.cwd = None
+
+        def setProgram(self, _program) -> None:
+            pass
+
+        def setArguments(self, _arguments) -> None:
+            pass
+
+        def setWorkingDirectory(self, cwd) -> None:
+            self.cwd = cwd
+
+        def start(self) -> None:
+            pass
+
+    project_dir = tmp_path / "project"
+    source_dir = project_dir / "src"
+    header_dir = project_dir / "include"
+    source_dir.mkdir(parents=True)
+    header_dir.mkdir()
+    (source_dir / "app.c").write_text("void main(void) {}\n", encoding="latin-1")
+    header = header_dir / "16F1509.H"
+    header.write_text("#pragma chip PIC16F1509\n", encoding="latin-1")
+    manifest = project_dir / "setcc-native.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "device": "PIC16F1509",
+                "compiler": "/unused/CC5X.EXE",
+                "runner": "/bin/true",
+                "header": {"mode": "existing", "path": "include/16F1509.H"},
+                "config_source": "src/app.c",
+                "main_source": "src/app.c",
+                "build_options": [],
+                "editions": {"production": {"config": {}, "build_options": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    app = QApplication.instance() or QApplication([])
+    try:
+        projects = cc5x_helper_gui.ProjectTab(lambda *_: None)
+        projects.project_path_edit.setText(str(manifest))
+        projects.load_project()
+        with mock.patch.object(cc5x_helper_gui, "QProcess", FakeProcess):
+            projects.build_project()
+        assert FakeProcess.last is not None
+        assert FakeProcess.last.cwd == str(source_dir)
+    finally:
+        app.quit()

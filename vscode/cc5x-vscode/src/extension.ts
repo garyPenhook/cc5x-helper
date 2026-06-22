@@ -670,7 +670,10 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
     if (ipecmd) {
       programArgs.push('--ipecmd', ipecmd);
     }
-    const result = await runHelperJson<ProgramResult>(root, programArgs);
+    // rejectError:false so a programming failure ({ok:false}) is returned, not thrown — the
+    // helper attaches actionable `guidance` to that payload, which the catch block below could
+    // never surface if runHelperJson threw on {ok:false} first.
+    const result = await runHelperJson<ProgramResult>(root, programArgs, { rejectError: false });
     // IPECMD's own output is captured into the JSON payload (helper --json). Echo it to
     // the channel so the user can see the flash log even though it no longer streams.
     if (result.stdout) {

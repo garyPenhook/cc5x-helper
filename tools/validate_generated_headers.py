@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from cc5x_setcc_native import find_device_metadata
+from cc5x_setcc_native import atomic_write_text, find_device_metadata
 from cc5x_setcc_native_lib.headergen import render_full_header
 from cc5x_setcc_native_lib.picmeta import load_device_metadata
 
@@ -127,7 +127,11 @@ def validate_device(device: str, runner: Path) -> list[CompileResult]:
     shipped_dir.mkdir(parents=True, exist_ok=True)
 
     generated_header_path = generated_dir / f"{short_name}.H"
-    generated_header_path.write_text(generate_device_header(device), encoding="latin-1")
+    atomic_write_text(
+        generated_header_path,
+        generate_device_header(device),
+        encoding="latin-1",
+    )
     generated_source_path = generated_dir / f"{short_name.lower()}_gen.c"
     write_validation_source(generated_source_path, generated_header_path.name)
     generated_result = run_compile(

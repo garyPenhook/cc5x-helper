@@ -258,6 +258,28 @@ def _safe_config_comment(text: str) -> str:
     return collapsed.encode("latin-1", "replace").decode("latin-1")
 
 
+def _safe_block_comment(text: str) -> str:
+    """Collapse untrusted text to a single line safe inside a ``/* ... */`` comment.
+
+    The block preamble interpolates a caller-supplied label (a manifest/edition name or
+    pack-derived device name). A ``*/`` in that label would close the comment early and
+    splice the following text in as live source; a newline would do the same. Collapse
+    whitespace, neutralize any ``*/`` sequence, and replace non-latin-1 characters so the
+    rendered preamble is always write-safe.
+    """
+    collapsed = " ".join(text.replace("\\", " ").split()).replace("*/", "* /")
+    return collapsed.encode("latin-1", "replace").decode("latin-1")
+
+
+# Config symbol/state names are restricted CC5X config tokens in real device headers
+# (CONFIG_LINE_RE enforces this when parsing; some legal states begin with a digit). Pack
+# metadata, however, is untrusted: a
+# crafted setting/value name could carry a newline or ``//`` and inject directives into the
+# generated ``#pragma config`` block. Validate against this charset and reject anything else
+# rather than silently coercing it (a coerced fuse name would set the wrong bits).
+_CONFIG_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
 def atomic_write_text(path: Path, text: str, encoding: str = "latin-1") -> None:
     """Write ``text`` to ``path`` atomically, never leaving a truncated/partial file.
 
@@ -303,6 +325,14 @@ def config_lines_for_settings(
             raise SystemExit(
                 f"invalid state for {name}: {state}. available: {available}"
             )
+        if not _CONFIG_TOKEN_RE.match(name) or not _CONFIG_TOKEN_RE.match(state):
+            # Header-parsed symbols always pass (CONFIG_LINE_RE), so this only fires for
+            # untrusted pack metadata carrying an unsafe name/state — refuse rather than
+            # emit it into the #pragma config block.
+            raise SystemExit(
+                f"unsafe config symbol/state for {name!r} = {state!r}: "
+                "only letters, digits, and underscore are allowed"
+            )
         line = f"#pragma config {name} = {state}"
         if option.comment:
             line += f" // {_safe_config_comment(option.comment)}"
@@ -322,7 +352,7 @@ def render_config_block(
     merged.update(settings)
     lines = [
         "/*",
-        f" * Managed by cc5x_setcc_native.py from {header_path.name}",
+        f" * Managed by cc5x_setcc_native.py from {_safe_block_comment(header_path.name)}",
         " * Update this block with the tool instead of editing it manually.",
         " */",
         f"// {START_MARKERS[family]}",
@@ -340,7 +370,7 @@ def render_config_block_from_symbols(
 ) -> str:
     lines = [
         "/*",
-        f" * Managed by cc5x_setcc_native.py from {source_label}",
+        f" * Managed by cc5x_setcc_native.py from {_safe_block_comment(source_label)}",
         " * Update this block with the tool instead of editing it manually.",
         " */",
         f"// {START_MARKERS[family]}",
@@ -357,6 +387,32 @@ def update_managed_block(
 ) -> tuple[str, bool]:
     start = START_MARKERS[family]
     end = END_MARKERS[family]
+    start_pattern = re.compile(
+        rf"(?m)^[ \t]*//[ \t]*{re.escape(start)}[ \t]*$"
+    )
+    end_pattern = re.compile(
+        rf"(?m)^[ \t]*//[ \t]*{re.escape(end)}[ \t]*$"
+    )
+    start_matches = list(start_pattern.finditer(source_text))
+    end_matches = list(end_pattern.finditer(source_text))
+    if not start_matches and not end_matches:
+        if source_text and not source_text.endswith("\n"):
+            source_text += "\n"
+        if source_text and not source_text.endswith("\n\n"):
+            source_text += "\n"
+        return source_text + block, False
+    if len(start_matches) != 1 or len(end_matches) != 1:
+        raise ValueError(
+            f"malformed managed config markers for family {family!r}: "
+            f"found {len(start_matches)} start marker(s) and {len(end_matches)} end marker(s); "
+            "expected exactly one of each"
+        )
+    if start_matches[0].start() >= end_matches[0].start():
+        raise ValueError(
+            f"malformed managed config markers for family {family!r}: "
+            "the end marker appears before the start marker"
+        )
+
     # Match only the managed region (an optional tool-written preamble immediately above the
     # start marker, then start..end), NOT from the beginning of the file. The previous
     # `^.*?//START` form anchored at file start, so replacing a block deleted every line
@@ -377,13 +433,12 @@ def update_managed_block(
         + r"[\s\S]*?"
         + rf"^[ \t]*//[ \t]*{re.escape(end)}[ \t]*$"
     )
-    if pattern.search(source_text):
-        return pattern.sub(block.rstrip("\n"), source_text, count=1), True
-    if source_text and not source_text.endswith("\n"):
-        source_text += "\n"
-    if source_text and not source_text.endswith("\n\n"):
-        source_text += "\n"
-    return source_text + block, False
+    if not pattern.search(source_text):
+        raise ValueError(
+            f"malformed managed config block for family {family!r}: "
+            "the marker pair could not be parsed safely"
+        )
+    return pattern.sub(block.rstrip("\n"), source_text, count=1), True
 
 
 def parse_key_value_pairs(items: Iterable[str]) -> dict[str, str]:
@@ -898,7 +953,10 @@ def ensure_project_header(project_path: Path, project) -> Path:
             # headergen rejects malformed pack metadata (e.g. an unsupported architecture);
             # surface it as a build-stopping error rather than a traceback (audit #6).
             raise SystemExit(f"cannot generate header for {project.device}: {exc}")
-        header_path.write_text(rendered, encoding="latin-1")
+        # Write atomically: a non-latin-1 byte (or any error) must not truncate an existing
+        # header to zero. atomic_write_text encodes before touching the destination, so a bad
+        # pack description fails the write whole rather than leaving a clobbered file.
+        atomic_write_text(header_path, rendered, encoding="latin-1")
         return header_path
     if header_path.exists():
         return header_path
@@ -916,16 +974,23 @@ def project_build_readiness_errors(project_path: Path, project) -> list[str]:
     if not config_source_path.is_file():
         errors.append(f"config_source not found: {config_source_path}")
 
-    compiler_path = Path(project.compiler).expanduser()
-    if not compiler_path.is_file():
-        errors.append(f"compiler not found: {compiler_path}")
+    runner_parts = shlex.split(project.runner) if project.runner else []
+    # A runner without the {compiler} placeholder is self-contained: build_command never
+    # passes the compiler path to it (see build_command), so a missing compiler file is not a
+    # build blocker. Only require the compiler on disk when it will actually be invoked —
+    # directly (no runner) or substituted into a {compiler}-placeholder runner (audit #6).
+    compiler_used = not runner_parts or any(
+        RUNNER_COMPILER_PLACEHOLDER in token for token in runner_parts
+    )
+    if compiler_used:
+        compiler_path = Path(project.compiler).expanduser()
+        if not compiler_path.is_file():
+            errors.append(f"compiler not found: {compiler_path}")
 
-    if project.runner:
-        runner_parts = shlex.split(project.runner)
-        if runner_parts:
-            runner_path = Path(runner_parts[0]).expanduser()
-            if runner_path.is_absolute() and not runner_path.exists():
-                errors.append(f"runner not found: {runner_path}")
+    if runner_parts:
+        runner_path = Path(runner_parts[0]).expanduser()
+        if runner_path.is_absolute() and not runner_path.exists():
+            errors.append(f"runner not found: {runner_path}")
 
     if project.header_mode in {"existing", "supplied"}:
         try:
@@ -1258,7 +1323,27 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
             print("command:", shlex.join(command))
         return 0
     if json_mode:
-        completed = subprocess.run(command, cwd=run_cwd, capture_output=True, text=True)
+        try:
+            completed = subprocess.run(command, cwd=run_cwd, capture_output=True, text=True)
+        except OSError as exc:
+            # --json-diagnostics promises parseable JSON on stdout; a launch failure
+            # (compiler missing/not executable) must stay JSON, not crash with a traceback
+            # and empty stdout (audit #4).
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "returncode": None,
+                        "command": command,
+                        "diagnostics": [],
+                        "stdout": "",
+                        "stderr": str(exc),
+                        "error": {"kind": "launch_failed", "message": str(exc)},
+                    },
+                    indent=2,
+                )
+            )
+            return 1
         combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
         payload = {
             "ok": completed.returncode == 0,
@@ -1495,7 +1580,7 @@ def ipecmd_failure_guidance(stdout: str, stderr: str, tool: str) -> list[str]:
     # Generic checklist (deduped against the leading matched hint).
     checklist = [
         f"Tool: a {tool} must be connected and the target powered; verify the `-TP` tool "
-        "code matches your programmer (PK4/PPK5/SNAP/ICD4/...).",
+        "code matches your programmer (PK4/PK5/SNAP/ICD4/PKOB4/...).",
         "USB permissions (Linux): your user needs access to the programmer's USB device — "
         "install the MPLAB X udev rules and re-plug the tool (a permission error here looks "
         "like 'no tool detected').",
@@ -1574,12 +1659,19 @@ def cmd_program(args: argparse.Namespace) -> int:
     # (and any other machine consumer) can parse it. IPECMD writes its own progress to
     # stdout/stderr, which would otherwise corrupt the payload (audit A2) — capture it
     # and fold it into the JSON. In human mode, let IPECMD stream through as before.
-    if args.json:
-        completed = subprocess.run(command, capture_output=True, text=True)
-        payload["stdout"] = completed.stdout
-        payload["stderr"] = completed.stderr
-    else:
-        completed = subprocess.run(command)
+    try:
+        if args.json:
+            completed = subprocess.run(command, capture_output=True, text=True)
+            payload["stdout"] = completed.stdout
+            payload["stderr"] = completed.stderr
+        else:
+            completed = subprocess.run(command)
+    except OSError as exc:
+        # IPECMD missing/not executable: keep the --json contract (structured error on
+        # stdout) instead of a traceback with empty stdout (audit #4).
+        return _program_error(
+            "launch_failed", f"could not launch IPECMD: {exc}", args.json, ipecmd=str(ipecmd)
+        )
     payload["ok"] = completed.returncode == 0
     payload["returncode"] = completed.returncode
     if completed.returncode != 0:
@@ -1913,9 +2005,29 @@ def cmd_project_validate(args: argparse.Namespace) -> int:
     return 0 if not errors and not has_error_diag else 1
 
 
+def _persist_mutated_project(
+    project, project_path: Path, baseline_errors: list[str], label: str
+) -> None:
+    """Write a mutated manifest, rejecting only validation errors the edit introduced.
+
+    Mutation commands must not persist state ``validate_project_file`` rejects — e.g.
+    ``project-set-config --set FOO=`` storing an empty config value (audit #8). But a manifest
+    can load yet already fail validation on an unrelated field (a future ``version``, a drifted
+    device): blocking on *every* error would lock the user out of editing it. So compare against
+    the errors the freshly-loaded manifest already had and refuse only the newly-introduced ones.
+    """
+    introduced = [e for e in validate_project_file(project) if e not in baseline_errors]
+    if introduced:
+        raise SystemExit(
+            f"invalid {label} for {project_path}:\n- " + "\n- ".join(introduced)
+        )
+    write_project_file(project, project_path)
+
+
 def cmd_project_edit_edition(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
+    baseline_errors = validate_project_file(project)
     existed = args.edition in project.editions
     try:
         if args.delete:
@@ -1933,7 +2045,7 @@ def cmd_project_edit_edition(args: argparse.Namespace) -> int:
         raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    write_project_file(project, project_path)
+    _persist_mutated_project(project, project_path, baseline_errors, "edition update")
     print(f"{action} edition {args.edition!r} in {project_path}")
     return 0
 
@@ -1941,6 +2053,7 @@ def cmd_project_edit_edition(args: argparse.Namespace) -> int:
 def cmd_project_set_config(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
+    baseline_errors = validate_project_file(project)
     updates = parse_key_value_pairs(args.set or [])
     try:
         if args.remove:
@@ -1955,7 +2068,7 @@ def cmd_project_set_config(args: argparse.Namespace) -> int:
     except KeyError as exc:
         missing = exc.args[0]
         raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
-    write_project_file(project, project_path)
+    _persist_mutated_project(project, project_path, baseline_errors, "config update")
     print(f"updated config for edition {args.edition!r} in {project_path}")
     return 0
 
@@ -1963,6 +2076,7 @@ def cmd_project_set_config(args: argparse.Namespace) -> int:
 def cmd_project_set_build_options(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
+    baseline_errors = validate_project_file(project)
     try:
         project = update_project_edition_build_options(
             project,
@@ -1972,7 +2086,7 @@ def cmd_project_set_build_options(args: argparse.Namespace) -> int:
     except KeyError as exc:
         missing = exc.args[0]
         raise SystemExit(f"unknown edition {missing!r} in {project_path}") from None
-    write_project_file(project, project_path)
+    _persist_mutated_project(project, project_path, baseline_errors, "build-options update")
     print(f"updated build options for edition {args.edition!r} in {project_path}")
     return 0
 
@@ -1980,6 +2094,7 @@ def cmd_project_set_build_options(args: argparse.Namespace) -> int:
 def cmd_project_edit(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
+    baseline_errors = validate_project_file(project)
     project = update_project_fields(
         project,
         device=args.device,
@@ -1993,12 +2108,7 @@ def cmd_project_edit(args: argparse.Namespace) -> int:
         clear_runner=args.clear_runner,
         clear_mplab_root=args.clear_mplab_root,
     )
-    errors = validate_project_file(project)
-    if errors:
-        raise SystemExit(
-            f"invalid project update for {project_path}:\n- " + "\n- ".join(errors)
-        )
-    write_project_file(project, project_path)
+    _persist_mutated_project(project, project_path, baseline_errors, "project update")
     print(f"updated project fields in {project_path}")
     return 0
 

@@ -1573,7 +1573,11 @@ class ProjectTab(QWidget):
         self.process = proc
         proc.setProgram(command[0])
         proc.setArguments(command[1:])
-        proc.setWorkingDirectory(str(project_path.parent))
+        # Run from the main source's directory, matching the CLI (_prepare_project_build uses
+        # source_path.parent). Using the manifest dir made nested projects resolve relative
+        # CC5X includes differently between the GUI and CLI (audit #7).
+        source_dir = project_path_join(project_path, project.main_source).parent
+        proc.setWorkingDirectory(str(source_dir))
         proc.readyReadStandardOutput.connect(
             lambda: self.output.append_text(bytes(proc.readAllStandardOutput()).decode(errors="replace"))
         )

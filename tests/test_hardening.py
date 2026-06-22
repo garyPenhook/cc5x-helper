@@ -20,6 +20,13 @@ def test_safe_comment_strips_backslash_line_splice() -> None:
     assert _safe_comment("  spaced   out  ") == "spaced out"
 
 
+def test_safe_comment_replaces_non_latin1() -> None:
+    # The header is written as latin-1; an unencodable description (audit #3) must be
+    # replaced here so it cannot raise UnicodeEncodeError after the file was truncated.
+    cleaned = _safe_comment("clock \U0001f600 select")
+    cleaned.encode("latin-1")  # must not raise
+
+
 def test_safe_identifier_neutralizes_injection() -> None:
     assert _safe_identifier("ADGO") == "ADGO"
     assert "\n" not in _safe_identifier("evil\nchar x @ 0")

@@ -31,8 +31,13 @@ def _safe_comment(text: str) -> str:
     Backslashes are stripped as well as newlines: a trailing backslash would splice
     the following generated line into the comment (C line-continuation runs before
     comments are recognized), which could swallow a subsequent #pragma/#endif.
+
+    Non-latin-1 characters are replaced too: the generated header is written as latin-1,
+    and an unencodable description (e.g. an emoji) would otherwise raise UnicodeEncodeError
+    only at write time — after the destination had been opened for truncation.
     """
-    return " ".join(text.replace("\\", " ").split())
+    collapsed = " ".join(text.replace("\\", " ").split())
+    return collapsed.encode("latin-1", "replace").decode("latin-1")
 
 
 ENHANCED_PREDEFINED_REGISTERS = {

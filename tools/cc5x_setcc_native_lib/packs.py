@@ -313,7 +313,9 @@ def list_devices_in_atpacks(
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 member_names = archive.namelist()
-        except zipfile.BadZipFile:
+        except (zipfile.BadZipFile, OSError):
+            # One unreadable entry (corrupt zip, a directory matching the glob, a
+            # permission error) must not abort discovery of every other pack — skip it.
             continue
 
         pdsc_name = next(
@@ -357,7 +359,10 @@ def find_device_in_atpacks(
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 names = set(archive.namelist())
-        except zipfile.BadZipFile:
+        except (zipfile.BadZipFile, OSError):
+            # Matches list_devices_in_atpacks: one unreadable entry (corrupt zip, a
+            # directory matching the glob, a permission error) must not abort resolution
+            # of every other device — skip it.
             continue
 
         pic_match = next((name for name in pic_candidates if name in names), None)
