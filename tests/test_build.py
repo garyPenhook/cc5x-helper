@@ -227,6 +227,86 @@ class ProjectBuildReadinessTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class UpdateManagedBlockTests(unittest.TestCase):
+    """sync-config must replace only the managed block, never preceding user code."""
+
+    BLOCK = (
+        "/*\n"
+        " * Managed by cc5x_setcc_native.py from new\n"
+        " * Update this block with the tool instead of editing it manually.\n"
+        " */\n"
+        "// START_CONFIG_SETCC_5X.\n"
+        "#pragma config NEW = OFF\n"
+        "// END_CONFIG_SETCC_5X.\n"
+    )
+
+    def test_replacing_block_preserves_code_before_and_after(self) -> None:
+        src = (
+            "int before;\n"
+            "int keep_me = 2;\n\n"
+            "/*\n"
+            " * Managed by cc5x_setcc_native.py from old\n"
+            " */\n"
+            "// START_CONFIG_SETCC_5X.\n"
+            "#pragma config OLD = ON\n"
+            "// END_CONFIG_SETCC_5X.\n\n"
+            "int after;\n"
+        )
+        updated, replaced = build.update_managed_block(src, self.BLOCK, "5x")
+        self.assertTrue(replaced)
+        # Regression: the old `^.*?//START` anchor deleted everything before the marker.
+        self.assertIn("int before;", updated)
+        self.assertIn("int keep_me = 2;", updated)
+        self.assertIn("int after;", updated)
+        self.assertIn("#pragma config NEW = OFF", updated)
+        self.assertNotIn("#pragma config OLD = ON", updated)
+        # Exactly one managed block remains.
+        self.assertEqual(updated.count("// START_CONFIG_SETCC_5X."), 1)
+
+    def test_replaces_old_block_without_preamble(self) -> None:
+        src = (
+            "int before;\n"
+            "// START_CONFIG_SETCC_5X.\n"
+            "#pragma config OLD = ON\n"
+            "// END_CONFIG_SETCC_5X.\n"
+            "int after;\n"
+        )
+        updated, replaced = build.update_managed_block(src, self.BLOCK, "5x")
+        self.assertTrue(replaced)
+        self.assertIn("int before;", updated)
+        self.assertIn("int after;", updated)
+        self.assertEqual(updated.count("// START_CONFIG_SETCC_5X."), 1)
+
+    def test_does_not_consume_user_comment_above_block(self) -> None:
+        src = (
+            "int x;\n"
+            "/* my own note */\n"
+            "/*\n"
+            " * Managed by cc5x_setcc_native.py from old\n"
+            " */\n"
+            "// START_CONFIG_SETCC_5X.\n"
+            "#pragma config OLD = ON\n"
+            "// END_CONFIG_SETCC_5X.\n"
+        )
+        updated, _ = build.update_managed_block(src, self.BLOCK, "5x")
+        self.assertIn("/* my own note */", updated)
+        self.assertIn("int x;", updated)
+
+    def test_appends_when_no_block_present(self) -> None:
+        src = "int only;\n"
+        updated, replaced = build.update_managed_block(src, self.BLOCK, "5x")
+        self.assertFalse(replaced)
+        self.assertIn("int only;", updated)
+        self.assertIn("// START_CONFIG_SETCC_5X.", updated)
+
+    def test_re_sync_is_idempotent(self) -> None:
+        src = "int before;\n" + self.BLOCK + "int after;\n"
+        once, _ = build.update_managed_block(src, self.BLOCK, "5x")
+        twice, _ = build.update_managed_block(once, self.BLOCK, "5x")
+        self.assertEqual(once, twice)
+        self.assertEqual(twice.count("// START_CONFIG_SETCC_5X."), 1)
+
+
 class ProjectGenerateHeaderTests(unittest.TestCase):
     """`project-generate-header` writes the generated header and refuses other modes."""
 

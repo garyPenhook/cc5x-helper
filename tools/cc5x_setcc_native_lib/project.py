@@ -95,6 +95,28 @@ def _require_field(payload: dict, key: str, path: Path) -> object:
     return payload[key]
 
 
+def _as_mapping(value: object, label: str, path: Path) -> dict:
+    """Coerce an optional manifest field to a dict, rejecting other JSON shapes cleanly."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: {label} must be an object")
+    return value
+
+
+def _as_str_list(value: object, label: str, path: Path) -> list[str]:
+    """Coerce an optional manifest field to a list of strings.
+
+    Guards against a bare string being treated as an iterable of characters (e.g.
+    "build_options": "-a" silently becoming ["-", "a"]).
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path}: {label} must be an array of strings")
+    return [str(item) for item in value]
+
+
 def load_project_file(path: Path) -> ProjectFile:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -102,15 +124,19 @@ def load_project_file(path: Path) -> ProjectFile:
     header = payload.get("header") or {}
     if not isinstance(header, dict):
         raise ValueError(f"{path}: 'header' must be an object")
-    editions_raw = payload.get("editions") or {}
-    editions = {
-        name: ProjectEdition(
+    editions_raw = _as_mapping(payload.get("editions"), "'editions'", path)
+    editions = {}
+    for name, item in editions_raw.items():
+        if not isinstance(item, dict):
+            raise ValueError(f"{path}: edition {name!r} must be an object")
+        config_raw = _as_mapping(item.get("config"), f"edition {name!r} 'config'", path)
+        editions[name] = ProjectEdition(
             name=name,
-            config=dict(item.get("config") or {}),
-            build_options=list(item.get("build_options") or []),
+            config={str(key): str(value) for key, value in config_raw.items()},
+            build_options=_as_str_list(
+                item.get("build_options"), f"edition {name!r} 'build_options'", path
+            ),
         )
-        for name, item in editions_raw.items()
-    }
     if "path" not in header:
         raise ValueError(f"{path}: missing required field 'header.path'")
     return ProjectFile(
@@ -122,7 +148,7 @@ def load_project_file(path: Path) -> ProjectFile:
         header_path=str(header["path"]),
         config_source=str(_require_field(payload, "config_source", path)),
         main_source=str(_require_field(payload, "main_source", path)),
-        base_build_options=list(payload.get("build_options") or []),
+        base_build_options=_as_str_list(payload.get("build_options"), "'build_options'", path),
         editions=editions,
         mplab_root=str(payload["mplab_root"]) if payload.get("mplab_root") is not None else None,
     )

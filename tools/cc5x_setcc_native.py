@@ -265,8 +265,25 @@ def update_managed_block(
 ) -> tuple[str, bool]:
     start = START_MARKERS[family]
     end = END_MARKERS[family]
+    # Match only the managed region (an optional tool-written preamble immediately above the
+    # start marker, then start..end), NOT from the beginning of the file. The previous
+    # `^.*?//START` form anchored at file start, so replacing a block deleted every line
+    # preceding the start marker — a silent data-loss bug.
+    # MULTILINE only (no DOTALL): line-oriented parts use [^\n] so they cannot run past a
+    # line, and only the block body uses [\s\S]*? to span lines lazily up to the end marker.
+    # This avoids cross-line over-matching / backtracking that a global `.` (DOTALL) invites.
+    managed_preamble = (
+        r"(?:^/\*\n"
+        r"[ \t]*\* Managed by cc5x_setcc_native\.py\b[^\n]*\n"
+        r"(?:[ \t]*\*[^\n]*\n)*?"
+        r"[ \t]*\*/\n)?"
+    )
     pattern = re.compile(
-        rf"(?ms)^.*?//\s*{re.escape(start)}\n.*?^//\s*{re.escape(end)}\s*$"
+        r"(?m)"
+        + managed_preamble
+        + rf"^[ \t]*//[ \t]*{re.escape(start)}[ \t]*\n"
+        + r"[\s\S]*?"
+        + rf"^[ \t]*//[ \t]*{re.escape(end)}[ \t]*$"
     )
     if pattern.search(source_text):
         return pattern.sub(block.rstrip("\n"), source_text, count=1), True

@@ -135,7 +135,11 @@ export function runHelper(
   }
   const timeoutMs = commandTimeoutMs();
   return new Promise<HelperResult>((resolve, reject) => {
-    const child = spawn(command, fullArgs, { cwd: root.uri.fsPath });
+    // detached on POSIX makes the child its own process-group leader, so a timeout can
+    // signal the whole group (Python *and* any IPECMD child it spawned) rather than only
+    // the Python parent — otherwise the programmer process keeps running after a "timeout".
+    const detached = process.platform !== 'win32';
+    const child = spawn(command, fullArgs, { cwd: root.uri.fsPath, detached });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -153,9 +157,22 @@ export function runHelper(
       }
       action();
     };
+    // Kill the child and (on POSIX) its whole process group, so a child it spawned (IPECMD)
+    // is torn down too. Negative pid targets the group; fall back to the direct child kill.
+    const killTree = (signal: NodeJS.Signals): void => {
+      if (detached && typeof child.pid === 'number') {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // The group may already be gone; fall through to a direct kill.
+        }
+      }
+      child.kill(signal);
+    };
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
-        child.kill('SIGTERM');
+        killTree('SIGTERM');
         finish(() =>
           reject(new Error(`CC5X command timed out after ${timeoutMs / 1000}s: ${command} ${fullArgs.join(' ')}`)),
         );

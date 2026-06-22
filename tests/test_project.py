@@ -101,6 +101,58 @@ class ProjectFileTests(unittest.TestCase):
             errors = validate_project_file(loaded)
             self.assertTrue(any("PIC10F/PIC12F/PIC16F" in error for error in errors))
 
+    def _write_manifest(self, path: Path, **overrides: object) -> None:
+        manifest = {
+            "version": 1,
+            "device": "PIC16F1509",
+            "compiler": "/compiler/CC5X.EXE",
+            "runner": None,
+            "header": {"mode": "generated", "path": "generated_headers/16F1509.H"},
+            "config_source": "app.c",
+            "main_source": "app.c",
+            "build_options": [],
+            "editions": {"production": {"config": {}, "build_options": []}},
+        }
+        manifest.update(overrides)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_load_rejects_non_object_edition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, editions={"production": 1})
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("edition 'production' must be an object", str(ctx.exception))
+
+    def test_load_rejects_string_build_options(self) -> None:
+        # "build_options": "-a" must not silently become ["-", "a"].
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(
+                path, editions={"production": {"config": {}, "build_options": "-a"}}
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("must be an array of strings", str(ctx.exception))
+
+    def test_load_rejects_non_object_editions_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, editions=[1, 2, 3])
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'editions' must be an object", str(ctx.exception))
+
+    def test_load_rejects_non_object_edition_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(
+                path, editions={"production": {"config": "BOREN=ON", "build_options": []}}
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'config' must be an object", str(ctx.exception))
+
     def test_can_copy_and_delete_editions(self) -> None:
         project = default_project_manifest(
             device="PIC16F1509",

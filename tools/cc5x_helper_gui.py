@@ -1291,14 +1291,12 @@ class ProjectTab(QWidget):
             )
         )
 
-    def _project_and_metadata(self):
-        project = load_project_file(self.require_project_path())
-        _, metadata = project_metadata(project)
-        return project, metadata
-
     @gui_action
     def render_header(self) -> None:
-        project, _ = self._project_and_metadata()
+        # ensure_project_header loads pack metadata itself, but only for generated-mode
+        # headers; loading it eagerly here broke valid existing/supplied (header-only)
+        # projects when packs were unavailable.
+        project = load_project_file(self.require_project_path())
         header_path = ensure_project_header(self.project_path(), project)
         self.output.write_text(header_path.read_text(encoding="latin-1"))
 
