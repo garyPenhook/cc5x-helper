@@ -58,9 +58,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.program', () => runProgram(root)),
     vscode.commands.registerCommand('cc5x.generateTasks', () => generateTasks(root)),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
-    vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) =>
-      vscode.window.showTextDocument(uri),
-    ),
+    vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
+      // Binary artifacts (.hex/.cod/.cof) can't open as text; surface the error
+      // instead of leaving an unhandled promise rejection.
+      void vscode.window.showTextDocument(uri).then(undefined, (err) =>
+        vscode.window.showErrorMessage(`CC5X: could not open ${uri.fsPath}: ${String(err)}`),
+      );
+    }),
   );
 
   if (root) {
@@ -68,13 +72,15 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.tasks.registerTaskProvider('cc5x', new Cc5xTaskProvider(root)),
     );
     const watcher = vscode.workspace.createFileSystemWatcher(manifestWatchPattern(root));
-    watcher.onDidChange(() => reloadProject(root));
-    watcher.onDidCreate(() => reloadProject(root));
-    // Clear the cached project when the manifest is deleted so stale data is not reused.
-    watcher.onDidDelete(() => {
-      currentProject = undefined;
-    });
-    context.subscriptions.push(watcher);
+    context.subscriptions.push(
+      watcher,
+      watcher.onDidChange(() => void reloadProject(root)),
+      watcher.onDidCreate(() => void reloadProject(root)),
+      // Clear the cached project when the manifest is deleted so stale data is not reused.
+      watcher.onDidDelete(() => {
+        currentProject = undefined;
+      }),
+    );
     // Only auto-run the helper (which executes the workspace-configured interpreter)
     // once the workspace is trusted; re-run when trust is granted.
     if (vscode.workspace.isTrusted) {

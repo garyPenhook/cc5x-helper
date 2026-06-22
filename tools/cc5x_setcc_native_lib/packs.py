@@ -427,7 +427,7 @@ def find_device_in_unpacked_packs(
         f"{normalized[3:].lower()}.cfgdata" if normalized.startswith("PIC") else f"{normalized.lower()}.cfgdata",
     }
     best_match: dict[str, str | None] | None = None
-    best_version: tuple[int, ...] = ()
+    best_version: tuple[int, ...] | None = None
 
     for root in roots:
         if not root.exists():
@@ -442,19 +442,35 @@ def find_device_in_unpacked_packs(
                         continue
                     for filename in filenames:
                         candidate = search_dir / filename
-                        if candidate.exists() and version_key >= best_version:
+                        if not candidate.exists():
+                            continue
+                        # A strictly newer version wins outright and resets the record;
+                        # ties keep the first version dir seen (dirs are sorted newest
+                        # first, roots in priority order).
+                        if best_version is None or version_key > best_version:
                             best_version = version_key
                             best_match = {
                                 "device": normalized,
                                 "pack_family": family_dir.name,
                                 "pack_version": version_dir.name,
                                 "pack_root": str(version_dir),
-                                "pic": str(candidate) if candidate.suffix.upper() == ".PIC" else None,
-                                "atdf": str(candidate) if candidate.suffix.lower() == ".atdf" else None,
-                                "cfgdata": str(candidate) if candidate.suffix.lower() == ".cfgdata" else None,
+                                "pic": None,
+                                "atdf": None,
+                                "cfgdata": None,
                                 "pdsc": None,
                                 "ini": None,
                             }
+                        # Merge files from the same winning version dir so a later
+                        # .cfgdata match does not clobber an earlier .PIC reference.
+                        if best_match is None or best_match["pack_root"] != str(version_dir):
+                            continue
+                        suffix = candidate.suffix
+                        if suffix.upper() == ".PIC" and best_match["pic"] is None:
+                            best_match["pic"] = str(candidate)
+                        elif suffix.lower() == ".atdf" and best_match["atdf"] is None:
+                            best_match["atdf"] = str(candidate)
+                        elif suffix.lower() == ".cfgdata" and best_match["cfgdata"] is None:
+                            best_match["cfgdata"] = str(candidate)
     if best_match:
         return best_match
     return _empty_result(normalized)

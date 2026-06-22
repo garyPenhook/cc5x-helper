@@ -81,6 +81,12 @@ export function programmerTool(): string {
   return config().get<string>('programmerTool', 'PK4');
 }
 
+/** Timeout (ms) before a spawned helper/IPECMD child is killed; 0 disables. */
+export function commandTimeoutMs(): number {
+  const seconds = config().get<number>('commandTimeoutSeconds', 300);
+  return seconds > 0 ? seconds * 1000 : 0;
+}
+
 /**
  * Run the CC5X helper with the given subcommand args.
  * Uses spawn (no shell) so arguments are passed without quoting issues.
@@ -96,10 +102,34 @@ export function runHelper(
   if (channel) {
     channel.appendLine(`$ ${command} ${fullArgs.join(' ')}`);
   }
+  const timeoutMs = commandTimeoutMs();
   return new Promise<HelperResult>((resolve, reject) => {
     const child = spawn(command, fullArgs, { cwd: root.uri.fsPath });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    // Settle exactly once and always clear the timer / kill a runaway child, so a hung
+    // python/IPECMD (e.g. waiting on absent hardware) can never leave the command
+    // pending forever or orphan the process.
+    const finish = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      action();
+    };
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        finish(() =>
+          reject(new Error(`CC5X command timed out after ${timeoutMs / 1000}s: ${command} ${fullArgs.join(' ')}`)),
+        );
+      }, timeoutMs);
+    }
     child.stdout.on('data', (data: Buffer) => {
       const text = data.toString();
       stdout += text;
@@ -110,8 +140,8 @@ export function runHelper(
       stderr += text;
       channel?.append(text);
     });
-    child.on('error', reject);
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on('error', (err) => finish(() => reject(err)));
+    child.on('close', (code) => finish(() => resolve({ code: code ?? -1, stdout, stderr })));
   });
 }
 

@@ -91,6 +91,20 @@ class DeviceMetadata:
         return json.dumps(asdict(self), indent=2)
 
 
+def _safe_hex(value: str | None) -> int | None:
+    """Parse a hex string, returning None instead of raising on malformed input.
+
+    INI numeric fields (ROMSIZE/BANKS/BANKSIZE) come from third-party pack metadata;
+    a non-hex or empty value should degrade to "unknown", not abort the whole load.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
+
+
 def _parse_ini_range_list(value: str) -> list[MemoryRange]:
     ranges: list[MemoryRange] = []
     for chunk in value.split(","):
@@ -114,8 +128,10 @@ def parse_ini_text(
     parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.optionxform = str
     parser.read_string("\n".join(section_lines))
-    section_name = parser.sections()[0]
-    section = dict(parser.items(section_name))
+    # An INI with no section header is malformed; treat it as having no keys rather
+    # than raising IndexError on sections()[0].
+    sections = parser.sections()
+    section = dict(parser.items(sections[0])) if sections else {}
 
     sfrs: list[IniSfr] = []
     sfr_fields: list[IniSfrField] = []
@@ -128,28 +144,33 @@ def parse_ini_text(
     }
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
-        if stripped.startswith("SFR="):
-            _, payload = stripped.split("=", 1)
-            name, address, width = payload.split(",", 2)
-            sfrs.append(IniSfr(name=name, address=int(address, 16), width=int(width, 10)))
-            continue
-        if stripped.startswith("SFRFLD="):
-            _, payload = stripped.split("=", 1)
-            name, address, bit_position, width = payload.split(",", 3)
-            sfr_fields.append(
-                IniSfrField(
-                    name=name,
-                    address=int(address, 16),
-                    bit_position=int(bit_position, 10),
-                    width=int(width, 10),
-                )
-            )
-            continue
-        for key in range_groups:
-            if stripped.startswith(f"{key}="):
+        # A single malformed SFR/SFRFLD/range line (too few fields, non-hex value)
+        # should be skipped, not abort parsing of the rest of the file.
+        try:
+            if stripped.startswith("SFR="):
                 _, payload = stripped.split("=", 1)
-                range_groups[key].extend(_parse_ini_range_list(payload))
-                break
+                name, address, width = payload.split(",", 2)
+                sfrs.append(IniSfr(name=name, address=int(address, 16), width=int(width, 10)))
+                continue
+            if stripped.startswith("SFRFLD="):
+                _, payload = stripped.split("=", 1)
+                name, address, bit_position, width = payload.split(",", 3)
+                sfr_fields.append(
+                    IniSfrField(
+                        name=name,
+                        address=int(address, 16),
+                        bit_position=int(bit_position, 10),
+                        width=int(width, 10),
+                    )
+                )
+                continue
+            for key in range_groups:
+                if stripped.startswith(f"{key}="):
+                    _, payload = stripped.split("=", 1)
+                    range_groups[key].extend(_parse_ini_range_list(payload))
+                    break
+        except ValueError:
+            continue
     return section, sfrs, sfr_fields, range_groups
 
 
@@ -161,42 +182,47 @@ def parse_cfgdata_text(text: str) -> list[ConfigWord]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("CWORD:"):
-            _, address, mask, default, name, *_rest = line.split(":")
-            current_word = ConfigWord(
-                address=int(address, 16),
-                mask=int(mask, 16),
-                default=int(default, 16),
-                name=name.split(",")[0],
-                settings=[],
-            )
-            words.append(current_word)
-            current_setting = None
-            continue
-        if line.startswith("CSETTING:"):
-            if current_word is None:
+        # Skip any individual malformed record (too few colon-separated fields or a
+        # non-hex number) rather than aborting the whole config-data parse.
+        try:
+            if line.startswith("CWORD:"):
+                _, address, mask, default, name, *_rest = line.split(":")
+                current_word = ConfigWord(
+                    address=int(address, 16),
+                    mask=int(mask, 16),
+                    default=int(default, 16),
+                    name=name.split(",")[0],
+                    settings=[],
+                )
+                words.append(current_word)
+                current_setting = None
                 continue
-            _, mask, name, description = line.split(":", 3)
-            setting = ConfigSetting(
-                mask=int(mask, 16),
-                name=name.split(",")[0],
-                description=description,
-                values=[],
-            )
-            current_word.settings.append(setting)
-            current_setting = setting
-            continue
-        if line.startswith("CVALUE:"):
-            if current_setting is None:
-                continue
-            _, value, name, description = line.split(":", 3)
-            current_setting.values.append(
-                ConfigValue(
-                    value=int(value, 16),
+            if line.startswith("CSETTING:"):
+                if current_word is None:
+                    continue
+                _, mask, name, description = line.split(":", 3)
+                setting = ConfigSetting(
+                    mask=int(mask, 16),
                     name=name.split(",")[0],
                     description=description,
+                    values=[],
                 )
-            )
+                current_word.settings.append(setting)
+                current_setting = setting
+                continue
+            if line.startswith("CVALUE:"):
+                if current_setting is None:
+                    continue
+                _, value, name, description = line.split(":", 3)
+                current_setting.values.append(
+                    ConfigValue(
+                        value=int(value, 16),
+                        name=name.split(",")[0],
+                        description=description,
+                    )
+                )
+        except ValueError:
+            continue
     return words
 
 
@@ -246,9 +272,9 @@ def load_device_metadata(
         device=device,
         ini_arch=ini_section.get("ARCH"),
         ini_procid=ini_section.get("PROCID"),
-        rom_size_words=int(ini_section["ROMSIZE"], 16) if "ROMSIZE" in ini_section else None,
-        banks=int(ini_section["BANKS"], 16) if "BANKS" in ini_section else None,
-        bank_size=int(ini_section["BANKSIZE"], 16) if "BANKSIZE" in ini_section else None,
+        rom_size_words=_safe_hex(ini_section.get("ROMSIZE")),
+        banks=_safe_hex(ini_section.get("BANKS")),
+        bank_size=_safe_hex(ini_section.get("BANKSIZE")),
         sfr_count=len(sfrs),
         sfr_field_count=len(sfr_fields),
         config_word_count=len(config_words),

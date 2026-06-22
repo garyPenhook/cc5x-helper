@@ -920,6 +920,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     print("command:", shlex.join(command))
     if args.dry_run:
         return 0
+    if args.cwd and not Path(args.cwd).is_dir():
+        raise SystemExit(f"--cwd directory does not exist: {args.cwd}")
     completed = subprocess.run(command, cwd=args.cwd or None)
     return completed.returncode
 
@@ -1227,7 +1229,13 @@ def cmd_vscode_tasks(args: argparse.Namespace) -> int:
                 )
             # Even with --force, never silently drop the user's tasks: back the file up
             # first so an unparseable tasks.json can be recovered (audit A3).
+            # Pick a backup name that does not already exist so a previous good
+            # backup is never overwritten.
             backup = output.with_name(output.name + ".bak")
+            counter = 1
+            while backup.exists():
+                backup = output.with_name(f"{output.name}.bak.{counter}")
+                counter += 1
             backup.write_text(raw, encoding="utf-8")
             print(f"warning: {output} was not valid JSON; backed it up to {backup} before overwriting")
             existing = {}
@@ -1816,7 +1824,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, OSError) as exc:
+        # Turn expected bad-input / file-IO failures (malformed manifest, missing or
+        # unreadable source/header files) into a clean message instead of a traceback.
+        raise SystemExit(f"error: {exc}")
 
 
 if __name__ == "__main__":

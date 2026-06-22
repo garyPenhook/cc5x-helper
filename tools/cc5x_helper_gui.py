@@ -22,30 +22,36 @@ if sys.platform.startswith("linux"):
     os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
     os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
 
-from PyQt6.QtCore import QProcess, Qt
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QDialog,
-    QFileDialog,
-    QFormLayout,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QPlainTextEdit,
-    QSplitter,
-    QTabWidget,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+try:
+    from PyQt6.QtCore import QObject, QProcess, Qt, pyqtSignal
+    from PyQt6.QtGui import QAction
+    from PyQt6.QtWidgets import (
+        QApplication,
+        QComboBox,
+        QDialog,
+        QFileDialog,
+        QFormLayout,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QListWidget,
+        QMainWindow,
+        QMessageBox,
+        QPushButton,
+        QPlainTextEdit,
+        QSplitter,
+        QTabWidget,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised only without the gui extra
+    raise SystemExit(
+        "cc5x-helper-gui requires PyQt6, which is an optional dependency.\n"
+        "Install it with:  uv sync --extra gui   (or)   pip install 'cc5x-helper[gui]'"
+    ) from exc
 
 try:
     from cc5x_setcc_native import (
@@ -671,7 +677,29 @@ def show_global_error(summary: str, details: str) -> None:
     box.exec()
 
 
+class _GuiErrorRelay(QObject):
+    """Marshals error dialogs raised on background threads onto the GUI thread.
+
+    Constructing/executing a QMessageBox off the GUI thread is undefined behavior, so
+    `threading.excepthook` emits this signal instead; because the relay lives in the
+    GUI thread, the queued connection runs `show_global_error` there.
+    """
+
+    error = pyqtSignal(str, str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.error.connect(show_global_error)
+
+
+# Kept alive for the process lifetime so the queued connection survives.
+_error_relay: "_GuiErrorRelay | None" = None
+
+
 def install_exception_hooks() -> None:
+    global _error_relay
+    _error_relay = _GuiErrorRelay()
+
     def handle_exception(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -685,7 +713,11 @@ def install_exception_hooks() -> None:
             args.exc_value,
             args.exc_traceback,
         )
-        show_global_error(summary, details)
+        # Hand off to the GUI thread; never build a QMessageBox here.
+        if _error_relay is not None:
+            _error_relay.error.emit(summary, details)
+        else:
+            print(details, file=sys.stderr, flush=True)
 
     sys.excepthook = handle_exception
     threading.excepthook = handle_thread_exception
@@ -929,6 +961,9 @@ class ProjectTab(QWidget):
         super().__init__()
         self.open_help = open_help
         self.process: QProcess | None = None
+        # Buttons that mutate project state or files a running build depends on; these
+        # are disabled while a build is in flight so the user cannot race the QProcess.
+        self._build_lock_buttons: list[QPushButton] = []
 
         root_layout = QVBoxLayout(self)
         path_row = QHBoxLayout()
@@ -944,6 +979,7 @@ class ProjectTab(QWidget):
         load_button = QPushButton("Load")
         load_button.clicked.connect(self.load_project)
         path_row.addWidget(load_button)
+        self._build_lock_buttons.extend([new_button, load_button])
         help_button = QPushButton("Help")
         help_button.clicked.connect(self.show_help)
         path_row.addWidget(help_button)
@@ -980,6 +1016,7 @@ class ProjectTab(QWidget):
         save_project_button = QPushButton("Save Project")
         save_project_button.clicked.connect(self.save_project_fields)
         project_buttons.addWidget(save_project_button)
+        self._build_lock_buttons.append(save_project_button)
         show_project_button = QPushButton("Show Summary")
         show_project_button.clicked.connect(self.show_project_summary)
         project_buttons.addWidget(show_project_button)
@@ -1000,6 +1037,7 @@ class ProjectTab(QWidget):
         delete_edition_button = QPushButton("Delete")
         delete_edition_button.clicked.connect(self.delete_edition)
         edition_row.addWidget(delete_edition_button)
+        self._build_lock_buttons.extend([add_edition_button, delete_edition_button])
         edition_layout.addLayout(edition_row)
         left_layout.addWidget(edition_group, 1)
         splitter.addWidget(left)
@@ -1019,6 +1057,7 @@ class ProjectTab(QWidget):
         remove_config_button = QPushButton("Clear Config")
         remove_config_button.clicked.connect(self.clear_edition_config)
         config_buttons.addWidget(remove_config_button)
+        self._build_lock_buttons.extend([save_config_button, remove_config_button])
         config_layout.addLayout(config_buttons)
         middle_layout.addWidget(config_group, 1)
 
@@ -1029,6 +1068,7 @@ class ProjectTab(QWidget):
         build_layout.addWidget(self.build_options_edit)
         save_build_button = QPushButton("Save Build Options")
         save_build_button.clicked.connect(self.save_build_options)
+        self._build_lock_buttons.append(save_build_button)
         build_layout.addWidget(save_build_button)
         middle_layout.addWidget(build_group, 1)
         splitter.addWidget(middle)
@@ -1049,6 +1089,7 @@ class ProjectTab(QWidget):
             button = QPushButton(label)
             button.clicked.connect(handler)
             action_grid.addWidget(button, index // 2, index % 2)
+            self._build_lock_buttons.append(button)
         right_layout.addLayout(action_grid)
 
         self.output = OutputPane()
@@ -1291,6 +1332,11 @@ class ProjectTab(QWidget):
             settings=settings,
         )
         source_path = project_path_join(project_path, project.config_source)
+        if not source_path.is_file():
+            raise SystemExit(
+                f"config source not found: {source_path}\n"
+                "Create the file or fix 'config_source' in the project before syncing."
+            )
         original = source_path.read_text(encoding="latin-1")
         updated, replaced = update_managed_block(original, block, "5x")
         source_path.write_text(updated, encoding="latin-1")
@@ -1320,21 +1366,45 @@ class ProjectTab(QWidget):
             return
         if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
             raise SystemExit("a build is already running")
-        self.process = QProcess(self)
-        self.process.setProgram(command[0])
-        self.process.setArguments(command[1:])
-        self.process.setWorkingDirectory(str(project_path.parent))
-        self.process.readyReadStandardOutput.connect(
-            lambda: self.output.append_text(bytes(self.process.readAllStandardOutput()).decode(errors="replace"))
+        # Capture the local `proc` in every slot rather than reading self.process, so a
+        # later build cannot make these slots read a different process.
+        proc = QProcess(self)
+        self.process = proc
+        proc.setProgram(command[0])
+        proc.setArguments(command[1:])
+        proc.setWorkingDirectory(str(project_path.parent))
+        proc.readyReadStandardOutput.connect(
+            lambda: self.output.append_text(bytes(proc.readAllStandardOutput()).decode(errors="replace"))
         )
-        self.process.readyReadStandardError.connect(
-            lambda: self.output.append_text(bytes(self.process.readAllStandardError()).decode(errors="replace"))
+        proc.readyReadStandardError.connect(
+            lambda: self.output.append_text(bytes(proc.readAllStandardError()).decode(errors="replace"))
         )
-        self.process.finished.connect(
-            lambda code, _status: self.output.append_text(f"\nprocess exited with code {code}\n")
-        )
+        proc.finished.connect(lambda code, _status, p=proc: self._on_build_finished(code, p))
+        # Only FailedToStart never emits finished(); other errors (Crashed) still do, and
+        # transient WriteError/ReadError must NOT re-enable controls mid-run.
+        proc.errorOccurred.connect(lambda err, p=proc: self._on_build_error(err, p))
+        self._set_build_running(True)
         self.output.write_text("command: " + subprocess.list2cmdline(command) + "\n\n")
-        self.process.start()
+        proc.start()
+
+    def _set_build_running(self, running: bool) -> None:
+        for button in self._build_lock_buttons:
+            button.setEnabled(not running)
+
+    def _on_build_error(self, error: QProcess.ProcessError, proc: QProcess) -> None:
+        # Only the start failure leaves no finished() signal; everything else either
+        # still ends with finished() (Crashed) or does not stop the process.
+        if error == QProcess.ProcessError.FailedToStart:
+            self.output.append_text("\nfailed to start build process\n")
+            self._on_build_finished(-1, proc)
+
+    def _on_build_finished(self, code: int, proc: QProcess) -> None:
+        # Idempotent: finished and a FailedToStart error can both reach here.
+        if self.process is not proc:
+            return
+        self.output.append_text(f"\nprocess exited with code {code}\n")
+        self.process = None
+        self._set_build_running(False)
 
 
 class MainWindow(QMainWindow):

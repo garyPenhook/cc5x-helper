@@ -149,13 +149,11 @@ def _ram_limit(metadata: DeviceMetadata) -> int | None:
     if not base_ranges:
         return None
     current_max = max(item.end for item in base_ranges)
-    changed = True
-    while changed:
-        changed = False
-        for item in metadata.common_ranges:
-            if item.start <= current_max + 1 and item.end > current_max:
-                current_max = item.end
-                changed = True
+    # Sort COMMON ranges by start so contiguous ranges merge regardless of the order
+    # they appear in the pack metadata; a single ascending pass then suffices.
+    for item in sorted(metadata.common_ranges, key=lambda r: r.start):
+        if item.start <= current_max + 1 and item.end > current_max:
+            current_max = item.end
     return current_max
 
 
@@ -350,7 +348,7 @@ def _should_suppress_byte_bitfields(register_name: str, fields: list[IniSfrField
         return False
     expected = {f"{register_name}{bit}" for bit in range(8)}
     names = {field.name for field in width1}
-    return names and names.issubset(expected)
+    return bool(names) and names.issubset(expected)
 
 
 def _canonical_bit_names(raw_name: str) -> list[str]:
