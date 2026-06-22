@@ -8,6 +8,7 @@ import unittest.mock
 from pathlib import Path
 
 import cc5x_setcc_native as build
+import validate_generated_headers as validate_headers
 
 
 class HeaderDefinesChipTests(unittest.TestCase):
@@ -139,6 +140,114 @@ class ResolveSuppliedHeaderTests(unittest.TestCase):
 
     def test_missing_returns_none(self) -> None:
         self.assertIsNone(build._resolve_supplied_header(self.dir, "16F1509"))
+
+
+class EnsureProjectHeaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _project(self, header_path: str, compiler: str | None = None) -> object:
+        return types.SimpleNamespace(
+            device="PIC16F1509",
+            header_mode="supplied",
+            header_path=header_path,
+            compiler=compiler or str(self.dir / "compiler" / "CC5X.EXE"),
+        )
+
+    def test_supplied_mode_uses_explicit_manifest_header_path(self) -> None:
+        manifest_header = self.dir / "include" / "16F1509.H"
+        compiler_header = self.dir / "compiler" / "16F1509.H"
+        manifest_header.parent.mkdir()
+        compiler_header.parent.mkdir()
+        manifest_header.write_text("#pragma chip PIC16F1509\n", encoding="latin-1")
+        compiler_header.write_text("#pragma chip PIC16F1939\n", encoding="latin-1")
+
+        resolved = build.ensure_project_header(
+            self.dir / "setcc-native.json",
+            self._project("include/16F1509.H"),
+        )
+        self.assertEqual(resolved, manifest_header.resolve())
+
+    def test_supplied_mode_bare_filename_uses_project_compiler_directory(self) -> None:
+        compiler = self.dir / "custom-cc5x" / "CC5X.EXE"
+        header = compiler.parent / "16f1509.h"
+        header.parent.mkdir()
+        header.write_text("#pragma chip PIC16F1509\n", encoding="latin-1")
+
+        resolved = build.ensure_project_header(
+            self.dir / "setcc-native.json",
+            self._project("16F1509.H", compiler=str(compiler)),
+        )
+        self.assertEqual(resolved, header)
+
+
+class ProjectBuildReadinessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.compiler = self.dir / "CC5X.EXE"
+        self.compiler.write_text("", encoding="ascii")
+        self.manifest = self.dir / "setcc-native.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_manifest(self, main_source: str = "app.c") -> None:
+        manifest = {
+            "version": 1,
+            "device": "PIC16F1509",
+            "compiler": str(self.compiler),
+            "runner": None,
+            "header": {"mode": "generated", "path": "gen/16F1509.H"},
+            "config_source": main_source,
+            "main_source": main_source,
+            "build_options": [],
+            "editions": {"production": {"config": {}, "build_options": []}},
+        }
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_project_validate_reports_missing_main_source(self) -> None:
+        self._write_manifest()
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_project_validate(types.SimpleNamespace(project=str(self.manifest), json=True))
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(call.args[0]) for call in printed.call_args_list))
+        self.assertTrue(any("main_source not found" in item for item in payload["build_errors"]))
+
+    def test_project_build_refuses_missing_main_source_before_subprocess(self) -> None:
+        self._write_manifest()
+        args = types.SimpleNamespace(project=str(self.manifest), edition="production", dry_run=False)
+        with unittest.mock.patch.object(build.subprocess, "run") as run:
+            with self.assertRaises(SystemExit):
+                build.cmd_build(args)
+        run.assert_not_called()
+
+
+class FindDeviceMetadataTests(unittest.TestCase):
+    def _result(self, version: str, root: str) -> dict[str, str | None]:
+        return {
+            "device": "PIC16F1509",
+            "pack_family": "PIC16F1xxxx_DFP",
+            "pack_version": version,
+            "pack_root": root,
+            "pic": f"{root}/edc/PIC16F1509.PIC",
+            "atdf": None,
+            "cfgdata": None,
+            "pdsc": None,
+            "ini": None,
+        }
+
+    def test_uses_highest_version_across_atpack_and_unpacked_packs(self) -> None:
+        with unittest.mock.patch.object(build, "find_device_in_atpacks", return_value=self._result("1.0.0", "old.atpack")), \
+             unittest.mock.patch.object(build, "find_device_in_unpacked_packs", return_value=self._result("2.0.0", "new")), \
+             unittest.mock.patch.object(build, "discover_mplab_roots", return_value=[]):
+            result = build.find_device_metadata("PIC16F1509", None)
+        self.assertEqual(result["pack_version"], "2.0.0")
+        self.assertEqual(result["pack_root"], "new")
 
 
 class StripJsoncTests(unittest.TestCase):
@@ -350,7 +459,7 @@ class GenerateVscodeTasksTests(unittest.TestCase):
         labels = [t["label"] for t in tasks]
         # 3 per edition (build, program, verify) + erase + blank-check
         self.assertEqual(len(tasks), 2 * 3 + 2)
-        self.assertTrue(all(l.startswith("CC5X:") for l in labels))
+        self.assertTrue(all(label.startswith("CC5X:") for label in labels))
         self.assertIn("CC5X: Erase (PK4)", labels)
         self.assertIn("CC5X: Blank Check (PK4)", labels)
 
@@ -383,6 +492,28 @@ class GenerateVscodeTasksTests(unittest.TestCase):
         tasks = self._tasks(problem_matcher="$cc5x")
         build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
         self.assertEqual(build_task["problemMatcher"], "$cc5x")
+
+
+class ValidateGeneratedHeadersTests(unittest.TestCase):
+    def test_compile_result_reports_actual_header_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "16f1509_gen.c"
+            header = root / "16F1509.H"
+            source.write_text('#include "16F1509.H"\nvoid main(void) {}\n', encoding="ascii")
+            header.write_text("#pragma chip PIC16F1509\n", encoding="latin-1")
+            source.with_suffix(".hex").write_text(":00000001FF\n", encoding="ascii")
+            fake = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            with unittest.mock.patch.object(validate_headers.subprocess, "run", return_value=fake):
+                result = validate_headers.run_compile(
+                    runner=Path("runner"),
+                    include_dir=root,
+                    source_path=source,
+                    header_path=header,
+                    label="generated",
+                    device="PIC16F1509",
+                )
+        self.assertEqual(result.header_path, str(header))
 
 
 if __name__ == "__main__":

@@ -48,6 +48,16 @@ class ProjectFileTests(unittest.TestCase):
         self.assertEqual(project.header_path, "generated_headers/16F1509.H")
         self.assertEqual(sorted(project.editions), ["debug", "production"])
 
+    def test_default_supplied_header_uses_device_header_name(self) -> None:
+        project = default_project_manifest(
+            device="PIC16F1509",
+            compiler="/opt/cc5x/CC5X.EXE",
+            runner=None,
+            main_source="app.c",
+            header_mode="supplied",
+        )
+        self.assertEqual(project.header_path, "16F1509.H")
+
     def test_write_and_load_project_file_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "setcc-native.json"

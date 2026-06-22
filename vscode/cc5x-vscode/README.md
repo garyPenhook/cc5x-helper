@@ -15,8 +15,8 @@ programming.
   Problems panel, and refreshes the artifact view.
 - **CC5X: Program Device** — programs a built `.hex` via IPECMD (with a confirmation prompt).
 - **CC5X: Generate VS Code Tasks** — writes `.vscode/tasks.json` (build + program/erase/verify).
-- **Task provider** (`type: cc5x`) — one `Build <edition>` task per edition, with the `$cc5x`
-  problem matcher; usable from `Run Task` / `Ctrl+Shift+B`.
+- **Task support** — `CC5X: Generate VS Code Tasks` writes concrete build/program/verify/erase
+  tasks to `.vscode/tasks.json`; the `type: cc5x` provider only resolves hand-authored tasks.
 - **CC5X Artifacts** view — lists `.hex/.asm/.occ/.var/.fcs/.cpr/.cod/.cof` outputs.
 
 ## Settings
