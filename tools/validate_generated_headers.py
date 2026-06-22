@@ -27,7 +27,7 @@ DEFAULT_DEVICES = [
     "PIC16F19195",
 ]
 DEFAULT_RUNNER = Path("/home/gary/apps/cc5x-run.sh")
-PROJECT_ROOT = Path("/home/gary/apps/cc5x_paid")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_HEADER_ROOT = PROJECT_ROOT / "cc5x_paid" / "CC5X"
 VALIDATION_ROOT = PROJECT_ROOT / "validation" / "generated"
 
@@ -73,7 +73,14 @@ def occ_summary(occ_path: Path) -> str | None:
     return None
 
 
-def run_compile(runner: Path, include_dir: Path, source_path: Path, label: str, device: str) -> CompileResult:
+def run_compile(
+    runner: Path,
+    include_dir: Path,
+    source_path: Path,
+    header_path: Path,
+    label: str,
+    device: str,
+) -> CompileResult:
     windows_include = to_windows_path(include_dir)
     windows_source = to_windows_path(source_path)
     completed = subprocess.run(
@@ -89,7 +96,7 @@ def run_compile(runner: Path, include_dir: Path, source_path: Path, label: str, 
         label=label,
         device=device,
         source_path=str(source_path),
-        header_path=str(include_dir / source_path.with_suffix(".H").name),
+        header_path=str(header_path),
         returncode=completed.returncode,
         succeeded=completed.returncode == 0 and hex_path.exists(),
         hex_exists=hex_path.exists(),
@@ -127,6 +134,7 @@ def validate_device(device: str, runner: Path) -> list[CompileResult]:
         runner=runner,
         include_dir=generated_dir,
         source_path=generated_source_path,
+        header_path=generated_header_path,
         label="generated",
         device=device,
     )
@@ -141,6 +149,7 @@ def validate_device(device: str, runner: Path) -> list[CompileResult]:
                 runner=runner,
                 include_dir=SHIPPED_HEADER_ROOT,
                 source_path=shipped_source_path,
+                header_path=shipped_header_path,
                 label="shipped",
                 device=device,
             )

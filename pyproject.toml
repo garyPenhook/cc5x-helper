@@ -29,6 +29,10 @@ classifiers = [
 
 [project.optional-dependencies]
 gui = ["PyQt6>=6.6"]
+dev = [
+  "flake8>=7,<8",
+  "pytest>=8,<9",
+]
 
 [project.scripts]
 cc5x-helper = "cc5x_setcc_native:main"

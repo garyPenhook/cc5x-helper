@@ -68,6 +68,8 @@ def default_project_manifest(
 ) -> ProjectFile:
     normalized = normalize_device_name(device)
     short_name = normalized[3:] if normalized.startswith("PIC") else normalized
+    if header_path is None and header_mode == "supplied":
+        header_path = f"{short_name}.H"
     return ProjectFile(
         version=DEFAULT_PROJECT_VERSION,
         device=normalized,

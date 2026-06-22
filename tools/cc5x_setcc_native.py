@@ -309,7 +309,15 @@ def find_device_metadata(device: str, mplab_root: str | None) -> dict[str, str |
     normalized = normalize_device_name(device)
     pack_result = find_device_in_unpacked_packs(normalized)
     atpack_result = find_device_in_atpacks(normalized)
-    active_pack = atpack_result if any(atpack_result.get(key) for key in ("pic", "cfgdata", "ini")) else pack_result
+    pack_candidates = [
+        result
+        for result in (atpack_result, pack_result)
+        if any(result.get(key) for key in ("pic", "atdf", "cfgdata", "ini"))
+    ]
+    active_pack = (
+        max(pack_candidates, key=lambda item: parse_version(item.get("pack_version")))
+        if pack_candidates else pack_result
+    )
     stem = normalized[3:].lower()
     roots = [root for root in discover_mplab_roots(mplab_root) if root.exists()]
     ini_path: Path | None = None
@@ -621,15 +629,36 @@ def _resolve_supplied_header(directory: Path, short_name: str) -> Path | None:
     return None
 
 
+def resolve_supplied_header(project_path: Path, project) -> Path:
+    """Resolve a compiler-supplied header without falling back to global defaults.
+
+    `header.path` may be an explicit file, a directory containing `<device>.H`, or just
+    the header filename. A bare filename is looked up next to the project compiler, so
+    `compiler` controls which CC5X install supplies the header.
+    """
+    short_name = device_short_name(project.device)
+    manifest_header_path = project_path_join(project_path, project.header_path)
+    if manifest_header_path.exists():
+        if manifest_header_path.is_dir():
+            supplied_path = _resolve_supplied_header(manifest_header_path, short_name)
+            if supplied_path is None:
+                raise SystemExit(
+                    f"supplied header {short_name}.H not found in {manifest_header_path}"
+                )
+            return supplied_path
+        return manifest_header_path
+
+    raw_header_path = Path(project.header_path).expanduser()
+    if len(raw_header_path.parts) == 1:
+        supplied_path = _resolve_supplied_header(Path(project.compiler).expanduser().parent, short_name)
+        if supplied_path is not None:
+            return supplied_path
+    raise SystemExit(f"supplied header not found: {manifest_header_path}")
+
+
 def ensure_project_header(project_path: Path, project) -> Path:
     if project.header_mode == "supplied":
-        short_name = device_short_name(project.device)
-        supplied_path = _resolve_supplied_header(DEFAULT_COMPILER.parent, short_name)
-        if supplied_path is None:
-            raise SystemExit(
-                f"supplied header {short_name}.H not found in {DEFAULT_COMPILER.parent}"
-            )
-        return supplied_path
+        return resolve_supplied_header(project_path, project)
     header_path = project_path_join(project_path, project.header_path)
     if project.header_mode == "generated":
         _, metadata = project_metadata(project)
@@ -639,6 +668,36 @@ def ensure_project_header(project_path: Path, project) -> Path:
     if header_path.exists():
         return header_path
     raise SystemExit(f"existing header not found: {header_path}")
+
+
+def project_build_readiness_errors(project_path: Path, project) -> list[str]:
+    """Local preflight checks for files needed before launching CC5X."""
+    errors: list[str] = []
+    source_path = project_path_join(project_path, project.main_source)
+    if not source_path.is_file():
+        errors.append(f"main_source not found: {source_path}")
+
+    config_source_path = project_path_join(project_path, project.config_source)
+    if not config_source_path.is_file():
+        errors.append(f"config_source not found: {config_source_path}")
+
+    compiler_path = Path(project.compiler).expanduser()
+    if not compiler_path.is_file():
+        errors.append(f"compiler not found: {compiler_path}")
+
+    if project.runner:
+        runner_parts = shlex.split(project.runner)
+        if runner_parts:
+            runner_path = Path(runner_parts[0]).expanduser()
+            if runner_path.is_absolute() and not runner_path.exists():
+                errors.append(f"runner not found: {runner_path}")
+
+    if project.header_mode in {"existing", "supplied"}:
+        try:
+            ensure_project_header(project_path, project)
+        except SystemExit as exc:
+            errors.append(str(exc))
+    return errors
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -828,6 +887,12 @@ def cmd_sync_config(args: argparse.Namespace) -> int:
 def cmd_build(args: argparse.Namespace) -> int:
     if args.project:
         project_path, project, edition = load_project_and_edition(args.project, args.edition)
+        build_errors = project_build_readiness_errors(project_path, project)
+        if build_errors:
+            raise SystemExit(
+                f"project is not ready to build {project_path}:\n- "
+                + "\n- ".join(build_errors)
+            )
         header_path = ensure_project_header(project_path, project)
         runner = shlex.split(project.runner) if project.runner else []
         source_path = project_path_join(project_path, project.main_source)
@@ -1211,14 +1276,32 @@ def cmd_project_init(args: argparse.Namespace) -> int:
 def cmd_project_validate(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
-    errors = validate_project_file(project)
+    schema_errors = validate_project_file(project)
+    build_errors = [] if schema_errors else project_build_readiness_errors(project_path, project)
+    errors = [*schema_errors, *build_errors]
     if args.json:
-        print(json.dumps({"project": str(project_path), "errors": errors}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "project": str(project_path),
+                    "schema_errors": schema_errors,
+                    "build_errors": build_errors,
+                    "errors": errors,
+                },
+                indent=2,
+            )
+        )
     else:
         if errors:
             print(f"invalid: {project_path}")
-            for error in errors:
-                print(f"- {error}")
+            if schema_errors:
+                print("schema:")
+                for error in schema_errors:
+                    print(f"- {error}")
+            if build_errors:
+                print("build readiness:")
+                for error in build_errors:
+                    print(f"- {error}")
         else:
             print(f"valid: {project_path}")
             print(f"device: {project.device}")

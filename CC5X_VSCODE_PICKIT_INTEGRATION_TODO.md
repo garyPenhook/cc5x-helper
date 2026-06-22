@@ -36,9 +36,10 @@ no dependency on the MPLAB-DebugAdapter extension and fully Linux-native.
 ## AUDIT FINDINGS — bugs to fix (from 2026-06-22 multi-angle review)
 
 These were defects in work completed this session. Ordered by severity. Correctness first.
-**All resolved 2026-06-22** (fixes verified: 65 Python tests pass, extension compiles clean
-under strict tsc, `doctor` reports ready/303 devices). A second multi-angle review of the fixes
-surfaced one further real bug (JSONC trailing-comma-before-comment), now also fixed + tested.
+**All resolved 2026-06-22** (fixes verified: 72 Python tests pass, extension compiles clean
+under strict tsc, `doctor` reports ready/303 devices, and 24 real CC5X generated/shipped header
+compile cases pass). A second multi-angle review of the fixes surfaced one further real bug
+(JSONC trailing-comma-before-comment), now also fixed + tested.
 
 ### Correctness (active bugs — fix before relying on the affected feature)
 
@@ -98,15 +99,49 @@ surfaced one further real bug (JSONC trailing-comma-before-comment), now also fi
       on an explicit `roots=` list (its sibling `list_devices_in_unpacked_packs` has one).
       **Fixed:** added the guard so a removed/non-existent root yields empty instead of crashing.
 
+### Follow-up review findings (resolved 2026-06-22)
+
+- [x] **B1 🟠 `project-validate` reported schema validity, not build readiness.**
+      **Fixed:** `project-validate --json` now reports `schema_errors`, `build_errors`, and
+      combined `errors`; `build --project` runs the same preflight and refuses missing
+      `main_source`, `config_source`, compiler, runner, and required existing/supplied header
+      files before launching CC5X. Verified with the local untracked manifest: it now fails
+      preflight on missing `app.c` and bad compiler path instead of invoking CC5X.
+
+- [x] **B2 🟠 `header.mode = "supplied"` ignored the manifest/compiler install.**
+      **Fixed:** supplied mode resolves an explicit manifest file, a manifest directory
+      containing `<device>.H`, or a bare header filename next to the configured project
+      compiler; it no longer falls back to `DEFAULT_COMPILER.parent`. Default supplied-mode
+      manifests now use `<device>.H`.
+
+- [x] **B3 🟠 Device metadata selection was inconsistent across `.atpack` and unpacked packs.**
+      **Fixed:** `find_device_metadata()` now compares candidate pack versions and uses the
+      highest available version across downloaded archives and installed MPLAB packs, matching
+      the `list-devices`/GUI merge behavior.
+
+- [x] **B4 🟡 Header-validation JSON reported the wrong header path.**
+      **Fixed:** `validate_generated_headers.py` now records the actual header included by each
+      compile case and derives `PROJECT_ROOT` from the script location, so it follows the renamed
+      checkout path.
+
+- [x] **B5 🟡 VS Code extension docs drifted from the task provider behavior.**
+      **Fixed:** `vscode/cc5x-vscode/README.md` now states that generated `.vscode/tasks.json`
+      is the runnable task source, while the `type: cc5x` provider only resolves hand-authored
+      tasks.
+
+- [x] **B6 🟡 Local lint workflow was not reproducible from project metadata.**
+      **Fixed:** added a `dev` extra (`flake8`, `pytest`) and changed CI to install
+      `python -m pip install -e ".[dev]"`, then run `python -m flake8` and `python -m pytest`.
+      Verified in a temporary venv; the strict CI flake8 gate reports `0`.
+
 ---
 
 ## Phase 0 — De-risk (do first, ~½ day)
 
 - [x] Run `python3 tools/cc5x_setcc_native.py doctor` and record current readiness.
-      → exit 0. `ready: no` **only** because pack discovery scans `/home/gary/apps` +
-      `/home/gary/Downloads` and finds 0 DFP packs; runner + compiler + CrossOver bottle all
-      present; 12 validated devices. (Pack discovery should also scan
-      `/opt/microchip/mplabx/v6.30/packs` — see follow-up below.)
+      → exit 0. `ready: yes`; pack discovery finds 303 CC5X-family devices from the installed
+      MPLAB X v6.30 packs, runner + compiler + CrossOver bottle are present, and 12 devices are
+      in the compiler-validated set.
 - [x] Build one compiler-validated device end-to-end from the terminal (PIC16F1509).
       → **PASS.** CC5X 3.8C ran via CrossOver/Wine and produced `main.hex` **byte-for-byte
       identical** to the validated reference `16f1509_gen.hex`. Reproducible.
@@ -139,13 +174,13 @@ surfaced one further real bug (JSONC trailing-comma-before-comment), now also fi
       unpacked trees; `doctor` + `list-devices` now merge archive + installed packs.
       Verified: `doctor` → `ready: yes`, 303 CC5X devices discovered from MPLAB X v6.30;
       `describe-device PIC16F1509` resolves full metadata from the installed packs.
-      Covered by new tests in `tests/test_packs.py` (28 tests pass).
+      Covered by tests in `tests/test_packs.py`; full suite now has 72 tests passing.
 - [x] Reconcile `-p<device>` vs `#pragma chip` so `build --project` doesn't emit a duplicate
       chip definition for generated-header projects.
       → `build --project` now adds `-p<device>` only when the resolved header lacks a
       `#pragma chip` (new `header_defines_chip()` in `cc5x_setcc_native.py`). Verified: header
       with `#pragma chip` builds clean (HEX matches reference), header without it gets `-p`.
-      Covered by `tests/test_build.py` (24 tests pass).
+      Covered by `tests/test_build.py`; full suite now has 72 tests passing.
       ✅ **RESOLVED (A1, A4):** both CLI and GUI now share `build_options_for_project()`, and a
       header `#pragma chip` that disagrees with `project.device` aborts the build.
 - [~] Broken 1339-line `16F1509.H`: **do not hand-edit header files** (per project rule). The
@@ -169,10 +204,11 @@ surfaced one further real bug (JSONC trailing-comma-before-comment), now also fi
 
 The bulk of the *reliable* work lives here. Do not reimplement this logic in TypeScript.
 
-- [ ] Add `--json` output + deterministic schema to `doctor`.
+- [x] Add `--json` output + deterministic schema to `doctor`.
 - [ ] Add `build --json-diagnostics` (normalize CC5X output to structured diagnostics).
 - [ ] Add `artifacts --json` (`.hex/.asm/.occ/.var/.fcs/.cpr/.cod/.cof`).
-- [ ] Add `project-show --json` and `list-devices --json`.
+- [x] Add `project-show --json` and `list-devices --json`.
+- [x] Add `project-validate --json` with split schema/build-readiness errors.
 - [ ] Standardize exit codes (nonzero on failure) and `error.kind` / `error.message` / `error.details`.
 - [ ] Add `--workspace-root` and default `--project` discovery for `setcc-native.json`.
 - [ ] Unit tests for each JSON command output.
@@ -254,7 +290,7 @@ Primary path: shell out to `ipecmd.sh` (Linux-native, no extra extension depende
       `--release-from-reset` (`-OL`), `--ipe-arg` passthrough, `--dry-run`, and a `--json`
       contract (`{ok, action, device, tool, ipecmd, image, command}` / `{ok:false, error:{kind,…}}`).
       Flags verified against `Readme for IPECMD.htm`: program `-M`, verify `-Y`, erase `-E`,
-      blank-check `-C`. Covered by `tests/test_build.py` (37 tests pass).
+      blank-check `-C`. Covered by `tests/test_build.py`; full suite now has 72 tests passing.
       Remaining: on a real (non-dry-run) `--json` invocation, IPECMD's own stdout streams
       before the JSON summary — capture it into the payload if the extension needs pure JSON.
       ✅ **RESOLVED (A2):** `--json` now captures IPECMD stdout/stderr into the payload, so the
@@ -269,12 +305,12 @@ Primary path: shell out to `ipecmd.sh` (Linux-native, no extra extension depende
       an invalid existing `tasks.json` without `--force`. Options: `--tool`, `--python`,
       `--helper`, `--problem-matcher`, `--manifest`, `--output`, `--stdout`. Schema verified
       against VS Code docs (version 2.0.0, group/dependsOn/dependsOrder). Covered by
-      `tests/test_build.py` (42 tests pass).
+      `tests/test_build.py`; full suite now has 72 tests passing.
       ✅ **RESOLVED (A3):** `strip_jsonc()` normalizes JSONC before parsing; `--force` backs up an
       unparseable file rather than discarding user tasks.
       ✅ **RESOLVED (A5):** the extension provider no longer contributes Build tasks; generated
       `tasks.json` is the single source, so no duplicates.
-- [ ] Map device → `-P` arg from the manifest; tool → `-TP` code via `cc5x.programmerTool`
+- [x] Map device → `-P` arg from the manifest; tool → `-TP` code via `cc5x.programmerTool`
       setting (`PK4`/`PPK5`/`SNAP`/`ICD4`/...). Default `PK4`.
 - [ ] Surface `ipecmd` exit code / output in the Problems/output channel; clear guidance
       when no tool is detected, USB perms missing, or device unsupported.
