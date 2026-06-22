@@ -88,9 +88,20 @@ def default_project_manifest(
     )
 
 
+def _require_field(payload: dict, key: str, path: Path) -> object:
+    """Fetch a required manifest field, raising a clear error instead of KeyError."""
+    if key not in payload:
+        raise ValueError(f"{path}: missing required field {key!r}")
+    return payload[key]
+
+
 def load_project_file(path: Path) -> ProjectFile:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: manifest must be a JSON object")
     header = payload.get("header") or {}
+    if not isinstance(header, dict):
+        raise ValueError(f"{path}: 'header' must be an object")
     editions_raw = payload.get("editions") or {}
     editions = {
         name: ProjectEdition(
@@ -100,15 +111,17 @@ def load_project_file(path: Path) -> ProjectFile:
         )
         for name, item in editions_raw.items()
     }
+    if "path" not in header:
+        raise ValueError(f"{path}: missing required field 'header.path'")
     return ProjectFile(
         version=int(payload.get("version", DEFAULT_PROJECT_VERSION)),
-        device=normalize_device_name(payload["device"]),
-        compiler=str(payload["compiler"]),
+        device=normalize_device_name(str(_require_field(payload, "device", path))),
+        compiler=str(_require_field(payload, "compiler", path)),
         runner=str(payload["runner"]) if payload.get("runner") is not None else None,
         header_mode=str(header.get("mode", "generated")),
         header_path=str(header["path"]),
-        config_source=str(payload["config_source"]),
-        main_source=str(payload["main_source"]),
+        config_source=str(_require_field(payload, "config_source", path)),
+        main_source=str(_require_field(payload, "main_source", path)),
         base_build_options=list(payload.get("build_options") or []),
         editions=editions,
         mplab_root=str(payload["mplab_root"]) if payload.get("mplab_root") is not None else None,

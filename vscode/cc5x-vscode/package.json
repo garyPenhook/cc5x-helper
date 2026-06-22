@@ -14,7 +14,8 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "workspaceContains:setcc-native.json"
+    "workspaceContains:setcc-native.json",
+    "onView:cc5xArtifacts"
   ],
   "contributes": {
     "commands": [
@@ -59,6 +60,11 @@
           "type": "string",
           "default": "PK4",
           "description": "IPECMD -TP tool code (PK4=PICkit 4, PK5=PICkit 5, SNAP, ICD4)."
+        },
+        "cc5x.commandTimeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "description": "Kill a build/program/doctor command if it runs longer than this many seconds (0 disables the timeout)."
         }
       }
     },
@@ -102,11 +108,13 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.84.0",
+    "@vscode/vsce": "^2.24.0",
     "typescript": "^5.4.0"
   }
 }
