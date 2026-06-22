@@ -93,6 +93,12 @@
       }
     ]
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "CC5X runs the workspace-configured Python interpreter, helper script, and IPECMD programmer, so it only operates in trusted workspaces."
+    }
+  },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",

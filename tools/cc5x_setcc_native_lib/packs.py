@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# Device files (.PIC/.cfgdata/.ini/.pdsc) are at most a few MB; cap reads from
+# untrusted `.atpack` archives well above that so a decompression bomb (a tiny
+# archive member that inflates to gigabytes) cannot exhaust memory.
+MAX_PACK_MEMBER_BYTES = 64 * 1024 * 1024
+
 PACK_STEM_RE = re.compile(
     r"^Microchip\.(?P<family>.+)\.(?P<version>\d+\.\d+\.\d+)$"
 )
@@ -363,12 +368,48 @@ def find_device_in_atpacks(
     return _empty_result(normalized)
 
 
+def _read_zip_member_capped(
+    archive: zipfile.ZipFile,
+    member_name: str,
+    max_bytes: int = MAX_PACK_MEMBER_BYTES,
+) -> bytes:
+    """Read a single archive member, refusing decompression bombs.
+
+    The declared size is checked first (cheap), then the stream itself is read with a
+    hard cap so a member whose ZIP header understates its inflated size still cannot
+    blow past the limit. `getinfo` also restricts reads to members the archive really
+    lists, so a crafted reference cannot pull in an unrelated path.
+    """
+    try:
+        info = archive.getinfo(member_name)
+    except KeyError as exc:
+        raise FileNotFoundError(f"archive member not found: {member_name}") from exc
+    if info.file_size > max_bytes:
+        raise ValueError(
+            f"refusing to read oversized archive member {member_name!r} "
+            f"({info.file_size} bytes exceeds {max_bytes}-byte limit)"
+        )
+    with archive.open(info) as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"archive member {member_name!r} exceeds {max_bytes}-byte limit"
+        )
+    return data
+
+
 def read_text_reference(reference: str, encoding: str = "utf-8") -> str:
     if "!/" in reference:
         archive_name, member_name = reference.split("!/", 1)
         with zipfile.ZipFile(archive_name) as archive:
-            return archive.read(member_name).decode(encoding)
-    return Path(reference).read_text(encoding=encoding)
+            return _read_zip_member_capped(archive, member_name).decode(encoding)
+    path = Path(reference)
+    if path.stat().st_size > MAX_PACK_MEMBER_BYTES:
+        raise ValueError(
+            f"refusing to read oversized device file {reference!r} "
+            f"({path.stat().st_size} bytes exceeds {MAX_PACK_MEMBER_BYTES}-byte limit)"
+        )
+    return path.read_text(encoding=encoding)
 
 
 def find_device_in_unpacked_packs(
