@@ -19,10 +19,15 @@ try:
     )
     from cc5x_setcc_native_lib.packs import (
         discover_atpack_dirs,
+        discover_pack_roots,
         find_device_in_atpacks,
         find_device_in_unpacked_packs,
         list_devices_in_atpacks,
+        list_devices_in_unpacked_packs,
+        mplabx_install_bases,
+        mplabx_version_dirs,
         normalize_device_name,
+        parse_version,
     )
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
     from cc5x_setcc_native_lib.project import (
@@ -45,10 +50,15 @@ except ModuleNotFoundError:
     )
     from tools.cc5x_setcc_native_lib.packs import (
         discover_atpack_dirs,
+        discover_pack_roots,
         find_device_in_atpacks,
         find_device_in_unpacked_packs,
         list_devices_in_atpacks,
+        list_devices_in_unpacked_packs,
+        mplabx_install_bases,
+        mplabx_version_dirs,
         normalize_device_name,
+        parse_version,
     )
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
     from tools.cc5x_setcc_native_lib.project import (
@@ -90,6 +100,8 @@ DEFAULT_CROSSOVER_BINARIES = [
     Path("/opt/cxoffice/bin/wine"),
 ]
 DEFAULT_CROSSOVER_BOTTLE = Path.home() / ".cxoffice" / "CC5X"
+# IPECMD `-TP` tool-select code; PK4 = MPLAB PICkit 4. See `Readme for IPECMD.htm`.
+DEFAULT_PROGRAMMER_TOOL = "PK4"
 
 
 @dataclass(frozen=True)
@@ -354,6 +366,147 @@ def build_command(
     return command
 
 
+# Matches a CC5X `#pragma chip ...` directive at the start of a (possibly indented)
+# line. CC5X rejects a build that selects the device both via `-p<chip>` and via a
+# `#pragma chip` in an included header ("Duplicate chip definition"), so the build
+# must supply `-p` only when the header does not already define the chip.
+_PRAGMA_CHIP_RE = re.compile(r"^\s*#\s*pragma\s+chip\b", re.IGNORECASE)
+# Captures the chip name token following `#pragma chip` (e.g. PIC16F1509 from
+# "#pragma chip PIC16F1509, core 14 enh"). CC5X chip names are alphanumeric.
+_PRAGMA_CHIP_NAME_RE = re.compile(
+    r"^\s*#\s*pragma\s+chip\s+(?P<chip>[A-Za-z0-9]+)", re.IGNORECASE
+)
+
+
+def header_defines_chip(header_path: Path) -> bool:
+    """Return True if the header declares the target chip via `#pragma chip`.
+
+    Generated and CC5X-supplied headers carry `#pragma chip`; user-provided
+    ("existing") headers may or may not. The caller uses this to decide whether to
+    also pass `-p<device>` on the command line without provoking a duplicate-chip error.
+    """
+    try:
+        text = header_path.read_text(encoding="latin-1")
+    except OSError:
+        return False
+    return any(_PRAGMA_CHIP_RE.match(line) for line in text.splitlines())
+
+
+def header_chip_name(header_path: Path) -> str | None:
+    """Return the chip named by the header's `#pragma chip`, or None.
+
+    None means either the header has no `#pragma chip` or its argument could not be
+    parsed; callers should not treat None as a device mismatch.
+    """
+    try:
+        text = header_path.read_text(encoding="latin-1")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = _PRAGMA_CHIP_NAME_RE.match(line)
+        if match:
+            return match.group("chip")
+    return None
+
+
+def build_options_for_project(project, edition, header_path: Path) -> list[str]:
+    """Assemble CC5X command-line options for a project edition build.
+
+    Shared by the CLI (`cmd_build`) and the GUI so both make the same `-p`/`#pragma chip`
+    decision (audit A1). When the resolved header selects the chip via `#pragma chip`,
+    `-p<device>` is omitted (CC5X rejects a duplicate chip definition); when the header
+    also names a parseable chip, it must equal the manifest device or the build is
+    refused rather than silently targeting the wrong part (audit A4).
+    """
+    options = [f"-I{header_path.parent}"]
+    if header_defines_chip(header_path):
+        chip = header_chip_name(header_path)
+        if chip is not None:
+            expected = normalize_device_name(project.device)
+            actual = normalize_device_name(chip)
+            if actual != expected:
+                raise SystemExit(
+                    f"header {header_path} selects chip {actual} but the project device is "
+                    f"{expected}; regenerate the header or fix the manifest device before building"
+                )
+    else:
+        options.insert(0, f"-p{device_short_name(project.device)}")
+    options.extend(project.base_build_options)
+    options.extend(edition.build_options)
+    return options
+
+
+def device_short_name(device: str) -> str:
+    """Device name without the leading ``PIC`` prefix.
+
+    IPECMD and CC5X both expect ``16F1509`` rather than ``PIC16F1509`` for PIC parts,
+    while AVR/SAM names (e.g. ``ATSAML11E16A``) are passed through unchanged.
+    """
+    normalized = normalize_device_name(device)
+    return normalized[3:] if normalized.startswith("PIC") else normalized
+
+
+# IPECMD operation flags, verified against `Readme for IPECMD.htm` (MPLAB X v6.30):
+#   program -> -M, verify -> -Y, erase -> -E, blank-check -> -C.
+# program/verify require a hex image (-F<file>); erase/blank-check do not.
+IPECMD_ACTION_FLAG = {
+    "program": "-M",
+    "verify": "-Y",
+    "erase": "-E",
+    "blank-check": "-C",
+}
+IPECMD_ACTIONS_NEEDING_IMAGE = ("program", "verify")
+
+
+def discover_ipecmd() -> Path | None:
+    """Locate an IPECMD launcher system-wide.
+
+    Order: ``$CC5X_IPECMD`` override, then ``mplab_platform/mplab_ipe/ipecmd.{sh,exe}``
+    under each installed MPLAB X version (newest path first).
+    """
+    override = os.environ.get("CC5X_IPECMD")
+    if override:
+        path = Path(override).expanduser()
+        return path if path.exists() else None
+    relative = (
+        Path("mplab_platform") / "mplab_ipe" / "ipecmd.sh",
+        Path("mplab_platform") / "mplab_ipe" / "ipecmd.exe",
+    )
+    # Newest installed MPLAB X first (shared walk, numeric version order: v6.30 > v6.5).
+    for version_dir in mplabx_version_dirs():
+        for rel in relative:
+            candidate = version_dir / rel
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def ipecmd_command(
+    ipecmd: Path,
+    device: str,
+    tool: str,
+    action: str,
+    image: Path | None,
+    release_from_reset: bool = False,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """Build an IPECMD command line for a program/erase/verify/blank-check operation."""
+    if action not in IPECMD_ACTION_FLAG:
+        raise SystemExit(
+            f"unknown ipecmd action {action!r}; expected one of {sorted(IPECMD_ACTION_FLAG)}"
+        )
+    command = [str(ipecmd), f"-P{device_short_name(device)}", f"-TP{tool}"]
+    if action in IPECMD_ACTIONS_NEEDING_IMAGE:
+        if image is None:
+            raise SystemExit(f"action {action!r} requires a hex image (--hex)")
+        command.append(f"-F{image}")
+    command.append(IPECMD_ACTION_FLAG[action])
+    if release_from_reset:
+        command.append("-OL")  # release target from reset after the operation
+    command.extend(extra_args or [])
+    return command
+
+
 def validated_device_names(validation_root: Path = VALIDATION_ROOT) -> list[str]:
     devices: list[str] = []
     if not validation_root.exists():
@@ -367,7 +520,22 @@ def validated_device_names(validation_root: Path = VALIDATION_ROOT) -> list[str]
 
 
 def environment_report() -> dict[str, object]:
-    pack_entries = list_devices_in_atpacks()
+    # Compute pack roots and the validated set once and reuse them below; previously the
+    # report walked discover_pack_roots() and validated_device_names() twice each (A10).
+    archive_dirs = discover_atpack_dirs()
+    pack_roots = discover_pack_roots()
+    atpack_entries = list_devices_in_atpacks()
+    unpacked_entries = list_devices_in_unpacked_packs(
+        roots=[root for root in pack_roots if root.exists()]
+    )
+    validated = validated_device_names()
+    # A device may be present in both a downloaded .atpack and an installed MPLAB X
+    # pack; count distinct device names so the totals are not double-counted.
+    pack_device_names = {
+        str(entry["device"])
+        for entry in (*atpack_entries, *unpacked_entries)
+        if entry.get("device")
+    }
     crossover_bins = {str(path): path.exists() for path in DEFAULT_CROSSOVER_BINARIES}
     runner_candidates = [DEFAULT_RUNNER]
     env_runner = os.environ.get("CC5X_RUNNER")
@@ -380,11 +548,13 @@ def environment_report() -> dict[str, object]:
     selected_runner = next((path for path in runner_candidates if path.exists()), None)
     selected_compiler = next((path for path in compiler_candidates if path.exists()), None)
     return {
-        "pack_archive_dirs": [str(path) for path in discover_atpack_dirs()],
-        "pack_archive_count": len(pack_entries),
-        "pack_device_count": len(pack_entries),
-        "validated_device_count": len(validated_device_names()),
-        "validated_devices": validated_device_names(),
+        "pack_archive_dirs": [str(path) for path in archive_dirs],
+        "pack_roots": [str(path) for path in pack_roots],
+        "pack_archive_count": len(atpack_entries),
+        "pack_unpacked_count": len(unpacked_entries),
+        "pack_device_count": len(pack_device_names),
+        "validated_device_count": len(validated),
+        "validated_devices": validated,
         "runner": str(selected_runner) if selected_runner else None,
         "runner_exists": bool(selected_runner),
         "compiler": str(selected_compiler) if selected_compiler else None,
@@ -392,7 +562,7 @@ def environment_report() -> dict[str, object]:
         "crossover_binaries": crossover_bins,
         "crossover_bottle": str(DEFAULT_CROSSOVER_BOTTLE),
         "crossover_bottle_exists": DEFAULT_CROSSOVER_BOTTLE.exists(),
-        "ready": bool(pack_entries) and bool(selected_runner) and bool(selected_compiler),
+        "ready": bool(pack_device_names) and bool(selected_runner) and bool(selected_compiler),
     }
 
 
@@ -430,12 +600,35 @@ def project_metadata(project) -> tuple[dict[str, str | None], object]:
     return result, metadata
 
 
+def _resolve_supplied_header(directory: Path, short_name: str) -> Path | None:
+    """Find a CC5X-supplied ``<short_name>.H`` header, case-insensitively.
+
+    ``device_short_name`` canonicalises the device to upper case (``16F1509``), but a
+    CC5X install on a case-sensitive filesystem may ship the header as ``16f1509.h`` or
+    similar. Try the canonical name first, then fall back to a case-insensitive scan so
+    the lookup does not depend on the manifest's device casing (audit A7).
+    """
+    target = f"{short_name}.h".lower()
+    for candidate in (directory / f"{short_name}.H", directory / f"{short_name}.h"):
+        if candidate.exists():
+            return candidate
+    try:
+        for entry in directory.iterdir():
+            if entry.is_file() and entry.name.lower() == target:
+                return entry
+    except OSError:
+        return None
+    return None
+
+
 def ensure_project_header(project_path: Path, project) -> Path:
     if project.header_mode == "supplied":
-        short_name = project.device[3:] if project.device.startswith("PIC") else project.device
-        supplied_path = DEFAULT_COMPILER.parent / f"{short_name}.H"
-        if not supplied_path.exists():
-            raise SystemExit(f"supplied header not found: {supplied_path}")
+        short_name = device_short_name(project.device)
+        supplied_path = _resolve_supplied_header(DEFAULT_COMPILER.parent, short_name)
+        if supplied_path is None:
+            raise SystemExit(
+                f"supplied header {short_name}.H not found in {DEFAULT_COMPILER.parent}"
+            )
         return supplied_path
     header_path = project_path_join(project_path, project.header_path)
     if project.header_mode == "generated":
@@ -638,12 +831,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         header_path = ensure_project_header(project_path, project)
         runner = shlex.split(project.runner) if project.runner else []
         source_path = project_path_join(project_path, project.main_source)
-        device_option = (
-            f"-p{project.device[3:]}" if project.device.startswith("PIC") else f"-p{project.device}"
-        )
-        options = [device_option, f"-I{header_path.parent}"]
-        options.extend(project.base_build_options)
-        options.extend(edition.build_options)
+        options = build_options_for_project(project, edition, header_path)
         command = build_command(
             compiler=project.compiler,
             main_file=str(source_path),
@@ -669,6 +857,334 @@ def cmd_build(args: argparse.Namespace) -> int:
         return 0
     completed = subprocess.run(command, cwd=args.cwd or None)
     return completed.returncode
+
+
+def _emit_program_payload(payload: dict[str, object], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+    if payload.get("ok") is False and payload.get("error"):
+        error = payload["error"]
+        print(f"error: {error.get('kind')}: {error.get('message')}")
+        return
+    print(f"action: {payload.get('action')}")
+    print(f"device: {payload.get('device')}  tool: {payload.get('tool')}")
+    if payload.get("image"):
+        print(f"image: {payload.get('image')}")
+    print("command:", shlex.join([str(part) for part in payload.get("command", [])]))
+
+
+def _program_error(kind: str, message: str, as_json: bool, **details: object) -> int:
+    payload: dict[str, object] = {"ok": False, "error": {"kind": kind, "message": message}}
+    if details:
+        payload["error"]["details"] = details  # type: ignore[index]
+    _emit_program_payload(payload, as_json)
+    return 1
+
+
+def cmd_program(args: argparse.Namespace) -> int:
+    """Drive MPLAB IPECMD to program/erase/verify/blank-check a device.
+
+    Resolves the device and (for program/verify) the hex image from an explicit flag or
+    from a project manifest, locates an IPECMD launcher, and builds + runs the command.
+    """
+    action = args.action
+    ipecmd = Path(args.ipecmd).expanduser() if args.ipecmd else discover_ipecmd()
+    device = args.device
+    image = Path(args.hex).expanduser() if args.hex else None
+
+    if args.project:
+        project_path, project, _ = load_project_and_edition(args.project, args.edition)
+        device = device or project.device
+        if image is None and action in IPECMD_ACTIONS_NEEDING_IMAGE:
+            source_path = project_path_join(project_path, project.main_source)
+            image = source_path.with_suffix(".hex")
+
+    if not device:
+        return _program_error(
+            "missing_device", "device is required (use --device or --project)", args.json
+        )
+    if ipecmd is None:
+        return _program_error(
+            "missing_ipecmd",
+            "IPECMD launcher not found; set $CC5X_IPECMD or install MPLAB X",
+            args.json,
+            searched=[str(base) for base in mplabx_install_bases()],
+        )
+    if action in IPECMD_ACTIONS_NEEDING_IMAGE:
+        if image is None:
+            return _program_error(
+                "missing_image", f"action {action!r} requires a hex image (--hex)", args.json
+            )
+        if not args.dry_run and not image.exists():
+            return _program_error(
+                "image_not_found", f"hex image not found: {image}", args.json, image=str(image)
+            )
+
+    command = ipecmd_command(
+        ipecmd=ipecmd,
+        device=device,
+        tool=args.tool,
+        action=action,
+        image=image,
+        release_from_reset=args.release_from_reset,
+        extra_args=args.ipe_arg,
+    )
+    payload: dict[str, object] = {
+        "ok": True,
+        "action": action,
+        "device": normalize_device_name(device),
+        "tool": args.tool,
+        "ipecmd": str(ipecmd),
+        "image": str(image) if image else None,
+        "command": [str(part) for part in command],
+    }
+    if args.dry_run:
+        payload["dry_run"] = True
+        _emit_program_payload(payload, args.json)
+        return 0
+
+    # In --json mode the only thing on stdout must be the JSON object, so the extension
+    # (and any other machine consumer) can parse it. IPECMD writes its own progress to
+    # stdout/stderr, which would otherwise corrupt the payload (audit A2) — capture it
+    # and fold it into the JSON. In human mode, let IPECMD stream through as before.
+    if args.json:
+        completed = subprocess.run(command, capture_output=True, text=True)
+        payload["stdout"] = completed.stdout
+        payload["stderr"] = completed.stderr
+    else:
+        completed = subprocess.run(command)
+    payload["ok"] = completed.returncode == 0
+    payload["returncode"] = completed.returncode
+    _emit_program_payload(payload, args.json)
+    return completed.returncode
+
+
+CC5X_TASK_LABEL_PREFIX = "CC5X:"
+
+
+def generate_vscode_tasks(
+    project,
+    manifest: str,
+    python: str,
+    helper: str,
+    tool: str,
+    problem_matcher: object,
+) -> list[dict[str, object]]:
+    """Build the list of CC5X VS Code task definitions for a project manifest.
+
+    One build task per edition (the first is the default build task), each paired with a
+    program/verify task that runs after it, plus device-level erase and blank-check tasks.
+    Tasks use ``type: process`` so args are passed without shell quoting.
+    """
+    cwd = "${workspaceFolder}"
+    presentation = {"reveal": "always", "panel": "shared", "group": "cc5x"}
+
+    def helper_task(label: str, helper_args: list[str], extra: dict[str, object]) -> dict[str, object]:
+        task: dict[str, object] = {
+            "label": label,
+            "type": "process",
+            "command": python,
+            "args": [helper, *helper_args],
+            "options": {"cwd": cwd},
+            "problemMatcher": problem_matcher,
+            "presentation": presentation,
+        }
+        task.update(extra)
+        return task
+
+    tasks: list[dict[str, object]] = []
+    editions = sorted(project.editions)
+    for index, edition in enumerate(editions):
+        build_label = f"{CC5X_TASK_LABEL_PREFIX} Build {edition}"
+        tasks.append(
+            helper_task(
+                build_label,
+                ["build", "--project", manifest, "--edition", edition],
+                {"group": {"kind": "build", "isDefault": index == 0}},
+            )
+        )
+        tasks.append(
+            helper_task(
+                f"{CC5X_TASK_LABEL_PREFIX} Program {edition} ({tool})",
+                ["program", "--project", manifest, "--edition", edition, "--tool", tool],
+                {"dependsOn": build_label, "dependsOrder": "sequence"},
+            )
+        )
+        tasks.append(
+            helper_task(
+                f"{CC5X_TASK_LABEL_PREFIX} Verify {edition} ({tool})",
+                [
+                    "program", "--action", "verify",
+                    "--project", manifest, "--edition", edition, "--tool", tool,
+                ],
+                {"dependsOn": build_label, "dependsOrder": "sequence"},
+            )
+        )
+
+    tasks.append(
+        helper_task(
+            f"{CC5X_TASK_LABEL_PREFIX} Erase ({tool})",
+            ["program", "--action", "erase", "--project", manifest, "--tool", tool],
+            {},
+        )
+    )
+    tasks.append(
+        helper_task(
+            f"{CC5X_TASK_LABEL_PREFIX} Blank Check ({tool})",
+            ["program", "--action", "blank-check", "--project", manifest, "--tool", tool],
+            {},
+        )
+    )
+    return tasks
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Remove ``//`` line and ``/* */`` block comments, ignoring those inside strings."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Drop commas immediately before a closing ``}``/``]`` (ignoring strings)."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def strip_jsonc(text: str) -> str:
+    """Normalize JSONC (the dialect VS Code writes for tasks.json) into strict JSON.
+
+    Removes ``//`` line comments, ``/* */`` block comments, and trailing commas, while
+    leaving the contents of double-quoted strings untouched. ``json.loads`` rejects all
+    three, so without this the merge throws on any real tasks.json and (with --force)
+    used to discard every user task (audit A3).
+
+    Comments are stripped first and trailing commas second, in two passes: a comment can
+    sit between a comma and the closing ``}``/``]`` (``[ {...}, /* note */ ]``), so the
+    trailing-comma scan must run after comments are gone or it would miss that comma.
+    """
+    return _strip_trailing_commas(_strip_jsonc_comments(text))
+
+
+def cmd_vscode_tasks(args: argparse.Namespace) -> int:
+    project_path, project, _ = load_project_and_edition(args.project, None)
+    manifest = args.manifest or project_path.name
+    problem_matcher: object = args.problem_matcher if args.problem_matcher else []
+    generated = generate_vscode_tasks(
+        project=project,
+        manifest=manifest,
+        python=args.python,
+        helper=args.helper,
+        tool=args.tool,
+        problem_matcher=problem_matcher,
+    )
+
+    output = Path(args.output) if args.output else project_path.parent / ".vscode" / "tasks.json"
+
+    # Merge: preserve the user's own tasks, replace only our CC5X-labelled ones.
+    preserved: list[dict[str, object]] = []
+    if output.exists():
+        existing: object = {}
+        try:
+            raw = output.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"cannot read {output}: {exc}")
+        try:
+            # VS Code writes JSONC (comments, trailing commas); normalize before parsing.
+            existing = json.loads(strip_jsonc(raw))
+        except json.JSONDecodeError as exc:
+            if not args.force:
+                raise SystemExit(
+                    f"{output} exists but is not valid JSON ({exc}); pass --force to overwrite "
+                    f"or --stdout to print instead"
+                )
+            # Even with --force, never silently drop the user's tasks: back the file up
+            # first so an unparseable tasks.json can be recovered (audit A3).
+            backup = output.with_name(output.name + ".bak")
+            backup.write_text(raw, encoding="utf-8")
+            print(f"warning: {output} was not valid JSON; backed it up to {backup} before overwriting")
+            existing = {}
+        for task in existing.get("tasks", []) if isinstance(existing, dict) else []:
+            label = task.get("label", "") if isinstance(task, dict) else ""
+            if not str(label).startswith(CC5X_TASK_LABEL_PREFIX):
+                preserved.append(task)
+
+    document = {"version": "2.0.0", "tasks": [*preserved, *generated]}
+    rendered = json.dumps(document, indent=2) + "\n"
+
+    if args.stdout:
+        sys.stdout.write(rendered)
+        return 0
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(rendered, encoding="utf-8")
+    print(
+        f"wrote {len(generated)} CC5X tasks to {output} "
+        f"(preserved {len(preserved)} existing task(s))"
+    )
+    return 0
 
 
 def cmd_project_init(args: argparse.Namespace) -> int:
@@ -871,12 +1387,32 @@ def cmd_project_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pack_version_key(entry: dict[str, str | None]) -> tuple[int, ...]:
+    return parse_version(entry.get("pack_version"))
+
+
+def merged_device_list(prefixes: tuple[str, ...]) -> list[dict[str, str | None]]:
+    """Devices from downloaded .atpack archives and installed (unpacked) MPLAB X packs,
+    merged by device name keeping the highest pack version. Shared by the CLI and GUI so
+    both report the same system-wide set (audit A1)."""
+    by_name: dict[str, dict[str, str | None]] = {}
+    for item in (
+        *list_devices_in_atpacks(prefixes=prefixes),
+        *list_devices_in_unpacked_packs(prefixes=prefixes),
+    ):
+        name = str(item["device"])
+        existing = by_name.get(name)
+        if existing is None or _pack_version_key(item) > _pack_version_key(existing):
+            by_name[name] = item
+    return [by_name[name] for name in sorted(by_name)]
+
+
 def cmd_list_devices(args: argparse.Namespace) -> int:
     prefixes = tuple(
         f"PIC{family.upper()}" if not family.upper().startswith("PIC") else family.upper()
         for family in (args.family or ["10F", "12F", "16F"])
     )
-    devices = list_devices_in_atpacks(prefixes=prefixes)
+    devices = merged_device_list(prefixes)
     if args.json:
         print(json.dumps(devices, indent=2))
         return 0
@@ -895,7 +1431,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return 0 if report["ready"] else 1
     print(f"ready: {'yes' if report['ready'] else 'no'}")
     print(f"pack archive dirs: {', '.join(report['pack_archive_dirs']) or '(none)'}")
-    print(f"pack devices: {report['pack_device_count']}")
+    print(f"pack roots: {', '.join(report['pack_roots']) or '(none)'}")
+    print(
+        f"pack devices: {report['pack_device_count']} "
+        f"(archive {report['pack_archive_count']}, installed {report['pack_unpacked_count']})"
+    )
     print(f"validated devices: {report['validated_device_count']}")
     if report["validated_devices"]:
         print(f"validated set: {', '.join(report['validated_devices'])}")
@@ -1119,6 +1659,73 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--cwd")
     build.add_argument("--dry-run", action="store_true")
     build.set_defaults(func=cmd_build)
+
+    program = subparsers.add_parser(
+        "program",
+        help="Program/erase/verify/blank-check a device via MPLAB IPECMD (PICkit 4/5, etc.).",
+    )
+    program.add_argument(
+        "--action",
+        choices=sorted(IPECMD_ACTION_FLAG),
+        default="program",
+        help="IPECMD operation (default: program).",
+    )
+    program.add_argument("--project", help="setcc-native.json manifest to read device/image from.")
+    program.add_argument("--edition")
+    program.add_argument("--device", help="Override device, e.g. PIC16F1509.")
+    program.add_argument("--hex", help="Hex image for program/verify (default: derived from project).")
+    program.add_argument(
+        "--tool",
+        default=DEFAULT_PROGRAMMER_TOOL,
+        help="IPECMD -TP tool code: PK4=PICkit 4, PK5=PICkit 5, SNAP, ICD4 (default: PK4).",
+    )
+    program.add_argument("--ipecmd", help="Path to ipecmd.sh/.exe (default: auto-discover, $CC5X_IPECMD).")
+    program.add_argument(
+        "--release-from-reset",
+        action="store_true",
+        help="Add -OL so the target runs after the operation.",
+    )
+    program.add_argument(
+        "--ipe-arg",
+        action="append",
+        help="Extra raw IPECMD argument (repeatable), e.g. --ipe-arg=-W2.5 to power the target.",
+    )
+    program.add_argument("--dry-run", action="store_true", help="Print the command without running it.")
+    program.add_argument("--json", action="store_true")
+    program.set_defaults(func=cmd_program)
+
+    vscode_tasks = subparsers.add_parser(
+        "vscode-tasks",
+        help="Generate/merge .vscode/tasks.json build + program tasks from a project manifest.",
+    )
+    vscode_tasks.add_argument("--project", required=True, help="setcc-native.json manifest.")
+    vscode_tasks.add_argument(
+        "--manifest",
+        help="Manifest path embedded in the tasks (default: manifest file name).",
+    )
+    vscode_tasks.add_argument("--python", default="python3", help="Python interpreter (default: python3).")
+    vscode_tasks.add_argument(
+        "--helper",
+        default="tools/cc5x_setcc_native.py",
+        help="Workspace-relative path to this helper (default: tools/cc5x_setcc_native.py).",
+    )
+    vscode_tasks.add_argument(
+        "--tool",
+        default=DEFAULT_PROGRAMMER_TOOL,
+        help="IPECMD -TP tool code for program/erase tasks (default: PK4).",
+    )
+    vscode_tasks.add_argument(
+        "--problem-matcher",
+        help="Problem matcher name for build tasks (default: none). E.g. $cc5x if the extension defines it.",
+    )
+    vscode_tasks.add_argument("--output", help="Output path (default: <manifest dir>/.vscode/tasks.json).")
+    vscode_tasks.add_argument("--stdout", action="store_true", help="Print instead of writing the file.")
+    vscode_tasks.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing tasks.json even if it is not valid JSON.",
+    )
+    vscode_tasks.set_defaults(func=cmd_vscode_tasks)
 
     return parser
 

@@ -1,0 +1,39 @@
+{
+  "build": {
+    "types": [
+      {
+        "type": "standard",
+        "steprefs": [
+          {
+            "idref": "compile"
+          }
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "id": "compile",
+        "inputextensions": "[cC]",
+        "binary": "gcc",
+        "emitters": [
+          {
+            "type": "text",
+            "emission": "--device ${MP_PROCESSOR_OPTION}",
+            "activation": "${!!MP_PROCESSOR_OPTION}"
+          },
+          {
+            "type": "text",
+            "emission": " --debug",
+            "activation": "${debug}"
+          },
+          {
+            "type": "text",
+            "emission": " ${MP_EXTRA_CC_PRE}",
+            "activation": "${!!MP_EXTRA_CC_PRE}"
+          }
+        ]
+      }
+    ],
+    "properties": {}
+  }
+}

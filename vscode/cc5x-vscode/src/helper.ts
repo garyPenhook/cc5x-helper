@@ -1,0 +1,141 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import { spawn } from 'child_process';
+
+/** Result of running the CC5X Python helper. */
+export interface HelperResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Minimal shape of a parsed project manifest (from `project-show --json`). */
+export interface ProjectInfo {
+  device: string;
+  main_source: string;
+  config_source: string;
+  header: { mode: string; path: string };
+  editions: Record<string, unknown>;
+}
+
+function config(): vscode.WorkspaceConfiguration {
+  return vscode.workspace.getConfiguration('cc5x');
+}
+
+/**
+ * The workspace folder that owns the CC5X project, or undefined if none is open.
+ *
+ * In a multi-root workspace the manifest may live in any folder, not folders[0]
+ * (audit A8), so prefer the folder that actually contains the configured manifest;
+ * fall back to the first folder when none matches.
+ */
+export function workspaceRoot(): vscode.WorkspaceFolder | undefined {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return undefined;
+  }
+  const rel = manifestRelPath();
+  if (path.isAbsolute(rel)) {
+    const owner = folders.find((f) => rel.startsWith(f.uri.fsPath + path.sep));
+    return owner ?? folders[0];
+  }
+  const owner = folders.find((f) => fs.existsSync(path.join(f.uri.fsPath, rel)));
+  return owner ?? folders[0];
+}
+
+/**
+ * Glob pattern that watches the manifest file. Handles an absolute `cc5x.manifest`,
+ * which would otherwise break `new RelativePattern(root, abs)` (audit A8).
+ */
+export function manifestWatchPattern(root: vscode.WorkspaceFolder): vscode.RelativePattern {
+  const rel = manifestRelPath();
+  if (path.isAbsolute(rel)) {
+    return new vscode.RelativePattern(path.dirname(rel), path.basename(rel));
+  }
+  return new vscode.RelativePattern(root, rel);
+}
+
+export function pythonPath(): string {
+  return config().get<string>('pythonPath', 'python3');
+}
+
+/** Absolute path to the Python helper, resolved against the workspace root. */
+export function helperPath(root: vscode.WorkspaceFolder): string {
+  const configured = config().get<string>('helperPath', 'tools/cc5x_setcc_native.py');
+  return path.isAbsolute(configured) ? configured : path.join(root.uri.fsPath, configured);
+}
+
+/** Workspace-relative manifest path (as the user configured it). */
+export function manifestRelPath(): string {
+  return config().get<string>('manifest', 'setcc-native.json');
+}
+
+/** Absolute manifest path resolved against the workspace root. */
+export function manifestAbsPath(root: vscode.WorkspaceFolder): string {
+  const rel = manifestRelPath();
+  return path.isAbsolute(rel) ? rel : path.join(root.uri.fsPath, rel);
+}
+
+export function programmerTool(): string {
+  return config().get<string>('programmerTool', 'PK4');
+}
+
+/**
+ * Run the CC5X helper with the given subcommand args.
+ * Uses spawn (no shell) so arguments are passed without quoting issues.
+ * Output is streamed to `channel` when provided, and also captured.
+ */
+export function runHelper(
+  root: vscode.WorkspaceFolder,
+  args: string[],
+  channel?: vscode.OutputChannel,
+): Promise<HelperResult> {
+  const command = pythonPath();
+  const fullArgs = [helperPath(root), ...args];
+  if (channel) {
+    channel.appendLine(`$ ${command} ${fullArgs.join(' ')}`);
+  }
+  return new Promise<HelperResult>((resolve, reject) => {
+    const child = spawn(command, fullArgs, { cwd: root.uri.fsPath });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      channel?.append(text);
+    });
+    child.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      channel?.append(text);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+  });
+}
+
+/** Run a helper subcommand with `--json` and parse stdout as JSON. */
+export async function runHelperJson<T>(
+  root: vscode.WorkspaceFolder,
+  args: string[],
+): Promise<T> {
+  const result = await runHelper(root, [...args, '--json']);
+  try {
+    return JSON.parse(result.stdout) as T;
+  } catch (err) {
+    throw new Error(
+      `CC5X helper did not return valid JSON for "${args.join(' ')}" ` +
+        `(exit ${result.code}): ${result.stderr || result.stdout}`,
+    );
+  }
+}
+
+/** Load and parse the project manifest via the helper. */
+export function loadProject(root: vscode.WorkspaceFolder): Promise<ProjectInfo> {
+  return runHelperJson<ProjectInfo>(root, [
+    'project-show',
+    '--project',
+    manifestAbsPath(root),
+  ]);
+}

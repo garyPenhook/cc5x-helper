@@ -1,0 +1,27 @@
+{
+  "id": "cc5x",
+  "name": "CC5X",
+  "version": "3.8C",
+  "binaries": {
+    "gcc": "./bin/cc5x-mplab-wrapper"
+  },
+  "options": {
+    "descriptors": [],
+    "properties": {}
+  },
+  "builds": {
+    "descriptors": [
+      "./builds-mplab-opt.json"
+    ],
+    "extensions": {
+      "c": "hex",
+      "asm": "asm"
+    },
+    "properties": {}
+  },
+  "properties": {
+    "cc5x": "1",
+    "baseline": "${device.family == Family.BASELINE ? 1 : 0}",
+    "midrange": "${device.family == Family.MIDRANGE ? 1 : 0}"
+  }
+}
