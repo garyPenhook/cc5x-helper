@@ -1190,6 +1190,87 @@ def cmd_build(args: argparse.Namespace) -> int:
     return _finish_build(command, run_cwd, args)
 
 
+# CC5X build outputs, matching the extension's artifact view (src/artifacts.ts).
+ARTIFACT_EXTENSIONS = (".hex", ".asm", ".occ", ".var", ".fcs", ".cpr", ".cod", ".cof")
+
+
+def collect_artifacts(search_dir: Path, max_depth: int = 4) -> list[dict[str, object]]:
+    """Find CC5X build artifacts under ``search_dir`` (newest first).
+
+    Mirrors the extension walk: recurse up to ``max_depth`` levels, skip ``node_modules``
+    and dotted directories, and collect files with an artifact extension. Each entry carries
+    ``path``/``name``/``type``/``size``/``mtime``; results are sorted by mtime descending so
+    the freshest build output is first. A missing/unreadable directory yields ``[]``.
+    """
+    found: dict[str, tuple[float, int]] = {}
+
+    def walk(directory: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            # Do not follow symlinked directories: matches the extension's Dirent.isDirectory()
+            # (false for symlinks) and avoids walking a symlink cycle.
+            if entry.is_dir() and not entry.is_symlink():
+                if entry.name != "node_modules" and not entry.name.startswith("."):
+                    walk(entry, depth + 1)
+            elif entry.suffix.lower() in ARTIFACT_EXTENSIONS:
+                try:
+                    stat = entry.stat()
+                    found[str(entry)] = (stat.st_mtime, stat.st_size)
+                except OSError:
+                    found[str(entry)] = (0.0, 0)
+
+    walk(search_dir, 0)
+    items = [
+        {
+            "path": path,
+            "name": Path(path).name,
+            "type": Path(path).suffix[1:].lower(),
+            "size": size,
+            "mtime": mtime,
+        }
+        for path, (mtime, size) in found.items()
+    ]
+    items.sort(key=lambda item: item["mtime"], reverse=True)
+    return items
+
+
+def cmd_artifacts(args: argparse.Namespace) -> int:
+    """List CC5X build artifacts for a project (or an explicit --dir) as text or JSON."""
+    try:
+        if args.project:
+            project_path = Path(args.project)
+            project = load_project_file(project_path)
+            search_dir = project_path_join(project_path, project.main_source).parent
+        elif args.dir:
+            search_dir = Path(args.dir).expanduser()
+        else:
+            raise SystemExit("artifacts requires --project or --dir")
+    except (SystemExit, OSError, ValueError) as exc:
+        # Honor the --json contract for a missing/malformed manifest too (parseable JSON on
+        # stdout), mirroring program --json and build --json-diagnostics.
+        if args.json:
+            print(json.dumps(
+                {"ok": False, "error": {"kind": "artifacts_failed", "message": str(exc)}}, indent=2
+            ))
+            return 1
+        raise
+    artifacts = collect_artifacts(search_dir)
+    if args.json:
+        print(json.dumps({"ok": True, "search_dir": str(search_dir), "artifacts": artifacts}, indent=2))
+        return 0
+    if not artifacts:
+        print(f"no artifacts in {search_dir}")
+        return 0
+    for artifact in artifacts:
+        print(f"{artifact['type'].upper():4} {artifact['path']}")
+    return 0
+
+
 def _emit_program_payload(payload: dict[str, object], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2))
@@ -2195,6 +2276,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit a JSON payload with CC5X output normalized to structured diagnostics.",
     )
     build.set_defaults(func=cmd_build)
+
+    artifacts = subparsers.add_parser(
+        "artifacts",
+        help="List CC5X build artifacts (.hex/.asm/.occ/.var/.fcs/.cpr/.cod/.cof) for a project.",
+    )
+    artifacts.add_argument("--project", help="Manifest; artifacts are searched under its main source dir.")
+    artifacts.add_argument("--dir", help="Explicit directory to search instead of a project.")
+    artifacts.add_argument("--json", action="store_true")
+    artifacts.set_defaults(func=cmd_artifacts)
 
     program = subparsers.add_parser(
         "program",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import types
 import unittest
@@ -383,6 +384,85 @@ def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
     for state in states:
         symbol.add(build.ConfigOption(register=1, mask=1, name=name, state=state))
     return symbol
+
+
+class CollectArtifactsTests(unittest.TestCase):
+    """Phase 1: `artifacts --json` enumerates CC5X build outputs (newest first)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_finds_artifact_extensions_and_skips_others(self) -> None:
+        (self.dir / "main.hex").write_text("x")
+        (self.dir / "main.asm").write_text("y")
+        (self.dir / "readme.txt").write_text("not an artifact")
+        names = {a["name"] for a in build.collect_artifacts(self.dir)}
+        self.assertEqual(names, {"main.hex", "main.asm"})
+
+    def test_recurses_but_skips_node_modules_and_dotdirs(self) -> None:
+        (self.dir / "main.hex").write_text("x")
+        sub = self.dir / "out"
+        sub.mkdir()
+        (sub / "deep.cod").write_text("z")
+        for skipped in ("node_modules", ".hidden"):
+            d = self.dir / skipped
+            d.mkdir()
+            (d / "junk.hex").write_text("no")
+        names = {a["name"] for a in build.collect_artifacts(self.dir)}
+        self.assertEqual(names, {"main.hex", "deep.cod"})
+
+    def test_sorted_newest_first(self) -> None:
+        old = self.dir / "old.hex"
+        old.write_text("x")
+        new = self.dir / "new.hex"
+        new.write_text("y")
+        os.utime(old, (1000, 1000))
+        os.utime(new, (2000, 2000))
+        artifacts = build.collect_artifacts(self.dir)
+        self.assertEqual([a["name"] for a in artifacts], ["new.hex", "old.hex"])
+
+    def test_missing_dir_returns_empty(self) -> None:
+        self.assertEqual(build.collect_artifacts(self.dir / "nope"), [])
+
+    def test_cmd_artifacts_json_error_on_missing_manifest(self) -> None:
+        # --json must stay parseable even when the manifest is missing/malformed.
+        args = types.SimpleNamespace(project=str(self.dir / "nope.json"), dir=None, json=True)
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_artifacts(args)
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["kind"], "artifacts_failed")
+
+    def test_symlinked_dir_not_followed(self) -> None:
+        # Parity with the extension (Dirent.isDirectory() is false for symlinks).
+        real = self.dir / "real"
+        real.mkdir()
+        (real / "inside.hex").write_text("x")
+        link = self.dir / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unsupported on this platform")
+        # The artifact is found once (via real/), not again through the symlink.
+        paths = [a["path"] for a in build.collect_artifacts(self.dir)]
+        self.assertTrue(any(p.endswith("real/inside.hex") for p in paths))
+        self.assertFalse(any("link/inside.hex" in p for p in paths))
+
+    def test_cmd_artifacts_json_payload(self) -> None:
+        (self.dir / "main.hex").write_text("x")
+        args = types.SimpleNamespace(project=None, dir=str(self.dir), json=True)
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_artifacts(args)
+        self.assertEqual(rc, 0)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["artifacts"][0]["type"], "hex")
+        self.assertEqual(payload["search_dir"], str(self.dir))
 
 
 class Cc5xDiagnosticsParseTests(unittest.TestCase):
