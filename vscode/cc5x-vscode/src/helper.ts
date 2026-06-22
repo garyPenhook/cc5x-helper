@@ -113,6 +113,24 @@ export function manifestAbsPath(root: vscode.WorkspaceFolder): string {
   return path.isAbsolute(rel) ? rel : path.join(root.uri.fsPath, rel);
 }
 
+/** Directory the manifest lives in — the base for its manifest-relative paths. */
+export function manifestDir(root: vscode.WorkspaceFolder): string {
+  return path.dirname(manifestAbsPath(root));
+}
+
+/**
+ * Resolve a manifest-relative project path (main_source / config_source / header) the way
+ * the CLI's `project_path_join` does: an absolute value is used as-is, otherwise it resolves
+ * against the **manifest's own directory** — NOT the workspace root, which differs when the
+ * manifest lives in a subdirectory. Resolving against the workspace root would point the
+ * artifact view, the diagnostics base dir, and the Sync-Config lens at the wrong files
+ * (audit #4 / #4b), and `path.join(workspaceRoot, absolutePath)` would mangle an absolute
+ * source path outright.
+ */
+export function resolveManifestRelative(root: vscode.WorkspaceFolder, p: string): string {
+  return path.isAbsolute(p) ? p : path.join(manifestDir(root), p);
+}
+
 export function programmerTool(): string {
   return config().get<string>('programmerTool', 'PK4');
 }
@@ -223,20 +241,48 @@ export function runHelper(
   });
 }
 
-/** Run a helper subcommand with `--json` and parse stdout as JSON. */
+/**
+ * Run a helper subcommand with `--json` and parse stdout as JSON.
+ *
+ * By default a `{ok:false, error:{kind,message}}` error-contract payload is thrown (so a
+ * failed command surfaces the real error instead of being cast to `T` — otherwise an array
+ * consumer later throws "parsed.map is not a function", audit #3). Callers whose result type
+ * legitimately carries `ok:false` as a handled outcome (e.g. `generateHeader`/
+ * `refreshIntellisense`, where a non-generated-mode project is a normal `{ok:false}` result)
+ * pass `rejectError:false` to receive the object instead.
+ */
 export async function runHelperJson<T>(
   root: vscode.WorkspaceFolder,
   args: string[],
+  opts: { rejectError?: boolean } = {},
 ): Promise<T> {
+  const { rejectError = true } = opts;
   const result = await runHelper(root, [...args, '--json']);
+  let parsed: unknown;
   try {
-    return JSON.parse(result.stdout) as T;
+    parsed = JSON.parse(result.stdout);
   } catch (err) {
     throw new Error(
       `CC5X helper did not return valid JSON for "${args.join(' ')}" ` +
         `(exit ${result.code}): ${result.stderr || result.stdout}`,
     );
   }
+  if (
+    rejectError &&
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    (parsed as { ok?: unknown }).ok === false
+  ) {
+    const error = (parsed as { error?: { kind?: string; message?: string } }).error;
+    throw new Error(
+      `CC5X helper "${args.join(' ')}" failed` +
+        (error?.kind ? ` [${error.kind}]` : '') +
+        (error?.message ? `: ${error.message}` : '') +
+        ` (exit ${result.code})`,
+    );
+  }
+  return parsed as T;
 }
 
 /** Load and parse the project manifest via the helper. */
@@ -339,11 +385,13 @@ export interface GenerateHeaderResult {
 export function generateHeader(
   root: vscode.WorkspaceFolder,
 ): Promise<GenerateHeaderResult> {
-  return runHelperJson<GenerateHeaderResult>(root, [
-    'project-generate-header',
-    '--project',
-    manifestAbsPath(root),
-  ]);
+  // {ok:false} (e.g. a supplied/existing-mode project: nothing to synthesize) is a handled
+  // result the caller reports via result.error — keep it, do not throw.
+  return runHelperJson<GenerateHeaderResult>(
+    root,
+    ['project-generate-header', '--project', manifestAbsPath(root)],
+    { rejectError: false },
+  );
 }
 
 export interface IntellisenseResult {
@@ -365,11 +413,13 @@ export interface IntellisenseResult {
 export function refreshIntellisense(
   root: vscode.WorkspaceFolder,
 ): Promise<IntellisenseResult> {
-  return runHelperJson<IntellisenseResult>(root, [
-    'intellisense',
-    '--project',
-    manifestAbsPath(root),
-  ]);
+  // {ok:false} (e.g. a device whose pack metadata cannot be resolved) is a handled result
+  // the caller reports via result.error — keep it, do not throw.
+  return runHelperJson<IntellisenseResult>(
+    root,
+    ['intellisense', '--project', manifestAbsPath(root)],
+    { rejectError: false },
+  );
 }
 
 /** Set the manifest's target device via `project-edit --device` (validates + writes). */

@@ -20,6 +20,7 @@ import {
   manifestAbsPath,
   manifestRelPath,
   manifestWatchPattern,
+  resolveManifestRelative,
   programmerTool,
   pythonPath,
   runHelper,
@@ -168,7 +169,9 @@ function ensureTrusted(): boolean {
 async function reloadProject(root: vscode.WorkspaceFolder): Promise<void> {
   try {
     currentProject = await loadProject(root);
-    const sourceDir = path.dirname(path.join(root.uri.fsPath, currentProject.main_source));
+    const sourceDir = path.dirname(resolveManifestRelative(root, currentProject.main_source));
+    // 'build' is a VS Code workspace convention (not a manifest-relative path), so it stays
+    // anchored to the workspace root; main_source genuinely is manifest-relative.
     artifacts.setSearchDirs([sourceDir, path.join(root.uri.fsPath, 'build')]);
   } catch (err) {
     currentProject = undefined;
@@ -239,7 +242,7 @@ async function createProject(root: vscode.WorkspaceFolder | undefined): Promise<
     return;
   }
   const mainInput = await vscode.window.showInputBox({
-    prompt: 'Main C source file (relative to the workspace)',
+    prompt: 'Main C source file (relative to the manifest)',
     value: 'main.c',
     validateInput: (v) => (v.trim().length === 0 ? 'Enter a file name' : undefined),
   });
@@ -293,7 +296,7 @@ async function createProject(root: vscode.WorkspaceFolder | undefined): Promise<
 
   // Scaffold the main source file if missing, then open it as a starting point. The
   // file is created empty (no assumed device/dialect content) for the user to fill.
-  const mainAbs = path.isAbsolute(main) ? main : path.join(root.uri.fsPath, main);
+  const mainAbs = resolveManifestRelative(root, main);
   try {
     if (!fs.existsSync(mainAbs)) {
       fs.mkdirSync(path.dirname(mainAbs), { recursive: true });
@@ -496,9 +499,7 @@ async function syncConfig(
   const targetPath =
     uri?.fsPath ??
     (currentProject
-      ? path.isAbsolute(currentProject.config_source)
-        ? currentProject.config_source
-        : path.join(root.uri.fsPath, currentProject.config_source)
+      ? resolveManifestRelative(root, currentProject.config_source)
       : undefined);
   if (targetPath) {
     // Normalize both sides: the palette fallback builds targetPath via path.join, which can
@@ -622,7 +623,7 @@ async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void>
   }
 
   const baseDir = currentProject
-    ? path.dirname(path.join(root.uri.fsPath, currentProject.main_source))
+    ? path.dirname(resolveManifestRelative(root, currentProject.main_source))
     : root.uri.fsPath;
   const count = publishCc5xDiagnostics(result.stdout + '\n' + result.stderr, baseDir, diagnostics);
   artifacts.refresh();

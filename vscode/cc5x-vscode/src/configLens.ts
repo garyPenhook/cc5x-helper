@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { ProjectInfo } from './helper';
+import { ProjectInfo, resolveManifestRelative } from './helper';
 
 // The helper delimits the managed config block with these markers (5x = PIC10/12/16,
 // 8e = PIC18). Mirrors START_MARKERS in tools/cc5x_setcc_native.py.
@@ -40,9 +40,7 @@ export class Cc5xConfigLensProvider implements vscode.CodeLensProvider {
     if (!root || !project) {
       return [];
     }
-    const configSource = path.isAbsolute(project.config_source)
-      ? project.config_source
-      : path.join(root.uri.fsPath, project.config_source);
+    const configSource = resolveManifestRelative(root, project.config_source);
     if (path.normalize(document.uri.fsPath) !== path.normalize(configSource)) {
       return [];
     }
