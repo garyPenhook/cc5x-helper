@@ -707,12 +707,18 @@ def resolve_project_manifest(
     1. An **absolute** ``--project`` path is used verbatim.
     2. A relative ``--project`` that carries a **directory component** (e.g.
        ``sub/setcc-native.json``) is anchored to the workspace root / current dir.
-    3. For a **bare filename** (the default ``setcc-native.json``), when ``discover`` is set
-       (every read/edit command): ``$CC5X_HELPER_PROJECT`` is honoured if set — one env var
-       pins the manifest for both the CLI and the GUI (which already reads it) — otherwise
-       the file is located git-style by walking up from the workspace root (or the current
-       dir), so the command works from any project subdirectory; failing that, the
-       conventional ``<root>/<name>`` is returned so a not-found error points there.
+    3. For a **bare filename** (the default ``setcc-native.json``), when ``discover`` is set:
+       ``$CC5X_HELPER_PROJECT`` is honoured if set (the GUI reads the same var), otherwise the
+       file is located git-style by walking up from the workspace root (or the current dir),
+       so the command works from any project subdirectory; failing that, the conventional
+       ``<root>/<name>`` is returned so a not-found error points there.
+
+    NB: the env pin only takes effect when this resolver actually runs. The read/edit commands
+    default ``--project`` to a bare name, so it always runs for them. The optional-project
+    commands (build/sync-config/artifacts/program) have no default and stay standalone unless
+    the user opts into project mode with ``--project`` or ``--workspace-root`` — so for those,
+    the env pin applies only once one of those engages resolution (it must not silently force
+    project mode and override an explicit standalone ``--compiler``/``--main``).
 
     ``discover=False`` (used by ``project-init``) neither pins via the env var nor walks up:
     a new manifest is created at the anchored ``<root>/<name>`` rather than resolving onto an
