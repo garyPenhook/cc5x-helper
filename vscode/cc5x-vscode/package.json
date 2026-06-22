@@ -19,6 +19,7 @@
   ],
   "contributes": {
     "commands": [
+      { "command": "cc5x.createProject", "title": "Create Project", "category": "CC5X" },
       { "command": "cc5x.doctor", "title": "Doctor", "category": "CC5X" },
       { "command": "cc5x.build", "title": "Build", "category": "CC5X" },
       { "command": "cc5x.program", "title": "Program Device", "category": "CC5X" },

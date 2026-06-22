@@ -10,6 +10,8 @@ programming.
 ## Features (MVP)
 
 - **Activation** when the workspace contains `setcc-native.json`.
+- **CC5X: Create Project** — wizard: pick a device, main source file, and header mode,
+  then write a `setcc-native.json` manifest (`project-init`) and open the main file.
 - **CC5X: Doctor** — runs `doctor --json`, reports readiness in the status bar + output channel.
 - **CC5X: Build** — builds a chosen edition, streams output, parses CC5X diagnostics into the
   Problems panel, and refreshes the artifact view.

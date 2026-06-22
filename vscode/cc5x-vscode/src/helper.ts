@@ -201,3 +201,37 @@ export function setProjectDevice(
     device,
   ]);
 }
+
+/** Options for {@link initProject}. */
+export interface InitProjectOptions {
+  device: string;
+  main: string;
+  headerMode: string;
+  /** Pass `--force` to overwrite an existing manifest (project-init refuses otherwise). */
+  force?: boolean;
+}
+
+/**
+ * Create a manifest at the configured path via `project-init`. The helper refuses to
+ * overwrite an existing file unless `--force` is set, surfaced here via `opts.force`.
+ */
+export function initProject(
+  root: vscode.WorkspaceFolder,
+  opts: InitProjectOptions,
+): Promise<HelperResult> {
+  const args = [
+    'project-init',
+    '--project',
+    manifestAbsPath(root),
+    '--device',
+    opts.device,
+    '--main',
+    opts.main,
+    '--header-mode',
+    opts.headerMode,
+  ];
+  if (opts.force) {
+    args.push('--force');
+  }
+  return runHelper(root, args);
+}

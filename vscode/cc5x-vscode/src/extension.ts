@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   DeviceInfo,
   HelperResult,
   ProjectInfo,
+  initProject,
   listDevices,
   loadProject,
   manifestAbsPath,
@@ -60,6 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.build', () => runBuild(root)),
     vscode.commands.registerCommand('cc5x.program', () => runProgram(root)),
     vscode.commands.registerCommand('cc5x.generateTasks', () => generateTasks(root)),
+    vscode.commands.registerCommand('cc5x.createProject', () => createProject(root)),
     vscode.commands.registerCommand('cc5x.selectDevice', () => selectDevice(root)),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
@@ -175,6 +178,90 @@ async function pickEdition(
     return editions[0];
   }
   return vscode.window.showQuickPick(editions, { placeHolder: placeholder });
+}
+
+/**
+ * Create-project wizard: pick a device (#12 picker), the main source file, and the
+ * header mode, then run `project-init` to write the manifest. Handles the
+ * already-exists case (project-init refuses without --force) by confirming an
+ * overwrite, and scaffolds + opens the main source file so the user has a start point.
+ */
+async function createProject(root: vscode.WorkspaceFolder | undefined): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  const device = await pickDevice(root, 'Select the target PIC device for the new project');
+  if (!device) {
+    return;
+  }
+  const mainInput = await vscode.window.showInputBox({
+    prompt: 'Main C source file (relative to the workspace)',
+    value: 'main.c',
+    validateInput: (v) => (v.trim().length === 0 ? 'Enter a file name' : undefined),
+  });
+  if (mainInput === undefined) {
+    return;
+  }
+  const main = mainInput.trim();
+  const headerMode = await vscode.window.showQuickPick(
+    [
+      { label: 'generated', description: 'Generate the device header from packs (default)' },
+      { label: 'supplied', description: 'Use a CC5X-supplied <device>.H next to the compiler' },
+      { label: 'existing', description: 'Use an existing header file you provide' },
+    ],
+    { placeHolder: 'Header mode' },
+  );
+  if (!headerMode) {
+    return;
+  }
+
+  // project-init refuses to overwrite an existing manifest without --force.
+  const manifestPath = manifestAbsPath(root);
+  let force = false;
+  if (fs.existsSync(manifestPath)) {
+    const overwrite = await vscode.window.showWarningMessage(
+      `${path.basename(manifestPath)} already exists. Overwrite it?`,
+      { modal: true },
+      'Overwrite',
+    );
+    if (overwrite !== 'Overwrite') {
+      return;
+    }
+    force = true;
+  }
+
+  let result: HelperResult;
+  try {
+    result = await initProject(root, { device, main, headerMode: headerMode.label, force });
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not create project: ${String(err)}`);
+    return;
+  }
+  if (result.code !== 0) {
+    channel.show(true);
+    channel.appendLine(result.stdout + result.stderr);
+    vscode.window.showErrorMessage('CC5X: failed to create project. See the CC5X output channel.');
+    return;
+  }
+
+  // Refresh the cached manifest immediately (the watcher also fires on the new file).
+  await reloadProject(root);
+
+  // Scaffold the main source file if missing, then open it as a starting point. The
+  // file is created empty (no assumed device/dialect content) for the user to fill.
+  const mainAbs = path.isAbsolute(main) ? main : path.join(root.uri.fsPath, main);
+  try {
+    if (!fs.existsSync(mainAbs)) {
+      fs.mkdirSync(path.dirname(mainAbs), { recursive: true });
+      fs.writeFileSync(mainAbs, '');
+    }
+    await vscode.window.showTextDocument(vscode.Uri.file(mainAbs));
+  } catch (err) {
+    channel.appendLine(`CC5X: created project but could not open ${mainAbs}: ${String(err)}`);
+  }
+  vscode.window.showInformationMessage(
+    `CC5X: created project for ${device} (${headerMode.label}).`,
+  );
 }
 
 /**
