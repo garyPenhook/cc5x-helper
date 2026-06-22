@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -405,14 +406,17 @@ def _read_text_file_capped(
 ) -> str:
     """Read a plain device file with a hard byte cap.
 
-    Requires a regular file (``is_file`` follows symlinks, so a link to /dev/zero, a
-    FIFO, or any device is rejected) and reads from the open handle rather than
-    trusting a preflight ``stat`` size, so a file that grows after the check, or one
-    whose size is understated, still cannot exhaust memory or block forever.
+    Opens the file first, then validates the *opened descriptor* with ``fstat`` so a
+    path swapped between check and open (TOCTOU on an attacker-writable pack root)
+    cannot substitute a FIFO or device. ``O_NONBLOCK`` makes opening a FIFO return
+    immediately instead of blocking on a writer, and the cap is applied to the read
+    so a regular file that grows after the open still cannot exhaust memory.
     """
-    if not path.is_file():
-        raise ValueError(f"not a regular file: {path}")
-    with open(path, "rb") as handle:
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:  # fdopen owns fd and closes it on exit
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError(f"not a regular file: {path}")
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError(
