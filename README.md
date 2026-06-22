@@ -184,7 +184,7 @@ export CC5X_IPECMD="/opt/microchip/mplabx/v6.30/mplab_platform/mplab_ipe/ipecmd.
 | Variable | Purpose |
 |----------|---------|
 | `CC5X_COMPILER` | Path to `CC5X.EXE` (overrides the default repo path) |
-| `CC5X_RUNNER` | Launcher used to run the Windows compiler (e.g. `wine` or a wrapper script) |
+| `CC5X_RUNNER` | Launcher used to run the Windows compiler (e.g. `wine {compiler}` or a wrapper script; a bare interpreter needs the `{compiler}` placeholder) |
 | `CC5X_ATPACK_DIRS` | `:`-separated dirs containing `Microchip.*.atpack` archives |
 | `CC5X_PACK_ROOTS` / `MPLABX_PACKS` | `:`-separated roots of unpacked `<family>/<version>/…` pack trees |
 | `CC5X_IPECMD` | Path to `ipecmd.sh`/`ipecmd.exe` for the `program` command |
@@ -345,7 +345,7 @@ uv run cc5x-helper vscode-tasks --project setcc-native.json --tool PK4
   "version": 1,
   "device": "PIC16F1509",
   "compiler": "/path/to/CC5X/CC5X.EXE",
-  "runner": "wine",
+  "runner": "wine {compiler}",
   "mplab_root": null,
   "header": { "mode": "generated", "path": "generated_headers/16F1509.H" },
   "config_source": "app.c",
@@ -362,7 +362,7 @@ uv run cc5x-helper vscode-tasks --project setcc-native.json --tool PK4
 |-------|---------|
 | `device` | Target PIC (e.g. `PIC16F1509`) |
 | `compiler` | Path to `CC5X.EXE` (defaults from `CC5X_COMPILER`) |
-| `runner` | Launcher prefix for the Windows compiler (e.g. `wine`) |
+| `runner` | Launcher for the Windows compiler (e.g. `wine {compiler}`; a bare interpreter needs the `{compiler}` placeholder) |
 | `header.mode` | `generated` (pack-derived), `supplied`, or `existing` |
 | `header.path` | Header file path used/produced for the build |
 | `config_source` / `main_source` | File that receives synced config / the build entry point |

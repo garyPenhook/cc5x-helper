@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -515,6 +516,38 @@ def build_command(
     return command
 
 
+def runner_executable(runner_spec: str) -> Path | None:
+    """Resolve a runner *command template* to the filesystem path of its executable.
+
+    A runner is not a plain path: it may carry arguments and the ``{compiler}`` placeholder
+    (``"/x/cc5x-run.sh {compiler}"``, ``"wine {compiler}"``). ``doctor`` must check the
+    executable token — the first ``shlex`` word — not the whole string; treating the template
+    as one path made ``…/runner {compiler}`` report as missing (audit #5). Returns ``None``
+    when the spec is empty/unparseable, leads with the placeholder, or the executable cannot
+    be found. An absolute/relative path is checked on disk; a bare command name (``wine``) is
+    looked up on ``$PATH``.
+    """
+    try:
+        tokens = shlex.split(runner_spec)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    first = tokens[0]
+    if RUNNER_COMPILER_PLACEHOLDER in first:
+        return None
+    candidate = Path(first).expanduser()
+    looks_like_path = (
+        candidate.is_absolute()
+        or os.sep in first
+        or (os.altsep is not None and os.altsep in first)
+    )
+    if looks_like_path:
+        return candidate if candidate.exists() else None
+    found = shutil.which(first)
+    return Path(found) if found else None
+
+
 # Matches a CC5X `#pragma chip ...` directive at the start of a (possibly indented)
 # line. CC5X rejects a build that selects the device both via `-p<chip>` and via a
 # `#pragma chip` in an included header ("Duplicate chip definition"), so the build
@@ -676,15 +709,20 @@ def environment_report() -> dict[str, object]:
         if entry.get("device")
     }
     crossover_bins = {str(path): path.exists() for path in DEFAULT_CROSSOVER_BINARIES}
-    runner_candidates = [DEFAULT_RUNNER]
+    # A runner is a command template (it may carry args + the {compiler} placeholder), so the
+    # spec string and its resolved executable are tracked separately: doctor reports the spec
+    # the user configured but checks existence on the executable token (audit #5).
+    runner_specs = [str(DEFAULT_RUNNER)]
     env_runner = os.environ.get("CC5X_RUNNER")
     if env_runner:
-        runner_candidates.insert(0, Path(env_runner).expanduser())
+        runner_specs.insert(0, env_runner)
     compiler_candidates = [DEFAULT_COMPILER]
     env_compiler = os.environ.get("CC5X_COMPILER")
     if env_compiler:
         compiler_candidates.insert(0, Path(env_compiler).expanduser())
-    selected_runner = next((path for path in runner_candidates if path.exists()), None)
+    selected_runner = next(
+        (spec for spec in runner_specs if runner_executable(spec) is not None), None
+    )
     selected_compiler = next((path for path in compiler_candidates if path.exists()), None)
     return {
         "pack_archive_dirs": [str(path) for path in archive_dirs],
@@ -854,7 +892,13 @@ def ensure_project_header(project_path: Path, project) -> Path:
     if project.header_mode == "generated":
         _, metadata = project_metadata(project)
         header_path.parent.mkdir(parents=True, exist_ok=True)
-        header_path.write_text(render_full_header(metadata), encoding="latin-1")
+        try:
+            rendered = render_full_header(metadata)
+        except ValueError as exc:
+            # headergen rejects malformed pack metadata (e.g. an unsupported architecture);
+            # surface it as a build-stopping error rather than a traceback (audit #6).
+            raise SystemExit(f"cannot generate header for {project.device}: {exc}")
+        header_path.write_text(rendered, encoding="latin-1")
         return header_path
     if header_path.exists():
         return header_path

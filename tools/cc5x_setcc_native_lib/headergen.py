@@ -73,6 +73,11 @@ PIC14EX_ALIAS_WHITELIST = {
 }
 
 
+# Device architectures the header generator can map to a CC5X `core` value. Anything else
+# is rejected rather than emitted verbatim (audit #6).
+KNOWN_ARCHS = {"PIC12", "PIC14", "PIC14E", "PIC14EX", "PIC16"}
+
+
 @dataclass(frozen=True)
 class HeaderProfile:
     core: str
@@ -82,7 +87,11 @@ class HeaderProfile:
 
 
 def _render_config_line(word_index: int, word, setting, value) -> str:
-    resolved_word = (word.default & ~setting.mask) | value.value
+    # Mask the pack-supplied value to its setting's bits before OR-ing it into the word: a
+    # malformed CVALUE with bits outside its setting mask must not bleed into the neighbouring
+    # settings of the same config word (audit #6). word.default supplies the bits this setting
+    # clears, so a legitimate value (already within the mask) is unaffected.
+    resolved_word = (word.default & ~setting.mask) | (value.value & setting.mask)
     return (
         f"#pragma config /{word_index} 0x{resolved_word:0X} "
         f"{_safe_identifier(setting.name)} = {_safe_identifier(value.name)} "
@@ -137,16 +146,20 @@ def _profile_for_arch(arch: str | None) -> HeaderProfile:
             wide_const_guard=None,
             wide_const_value=None,
         )
-    return HeaderProfile(
-        core=arch.lower() if arch else "unknown",
-        define_int_style=False,
-        wide_const_guard=None,
-        wide_const_value=None,
+    # Unknown/empty ARCH: pack metadata drives the `#pragma chip ... core <X>` directive, so a
+    # value outside the mapped set would silently emit an invalid core (e.g. `core pic12e`) or
+    # `core unknown` straight into the header (audit #6 — malformed metadata steering directives).
+    # Refuse rather than generate a header CC5X will reject mid-compile with a worse error.
+    raise ValueError(
+        f"unsupported device architecture {(arch or '(none)')!r}; "
+        f"the header generator maps only {', '.join(sorted(KNOWN_ARCHS))}"
     )
 
 
 def _sum_range_bytes(ranges: list[MemoryRange]) -> int:
-    return sum(item.end - item.start + 1 for item in ranges)
+    # Clamp each span at 0 so a malformed pack range (end < start) cannot contribute a
+    # negative byte count to the `#pragma chip ... ram` directive (audit #6).
+    return sum(max(0, item.end - item.start + 1) for item in ranges)
 
 
 def _ram_limit(metadata: DeviceMetadata) -> int | None:

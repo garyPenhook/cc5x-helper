@@ -378,6 +378,22 @@ class ProjectGenerateHeaderTests(unittest.TestCase):
         self.assertEqual(payload["error"]["kind"], "generate_failed")
         self.assertIn("malformed pack", payload["error"]["message"])
 
+    def test_reports_generate_failed_on_unsupported_architecture(self) -> None:
+        # Audit #6: headergen now raises ValueError for an unmapped arch; ensure_project_header
+        # converts it to a clean build-stopping error that the JSON contract reports.
+        self._write_manifest("generated")
+        with unittest.mock.patch.object(
+            build, "project_metadata", return_value=(None, object())
+        ), unittest.mock.patch.object(
+            build, "render_full_header", side_effect=ValueError("unsupported architecture")
+        ):
+            rc, payload = self._run()
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["kind"], "generate_failed")
+        self.assertIn("cannot generate header for PIC16F1509", payload["error"]["message"])
+        self.assertIn("unsupported architecture", payload["error"]["message"])
+
 
 def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
     symbol = build.ConfigSymbol(name=name)
@@ -622,6 +638,51 @@ class BuildCommandTests(unittest.TestCase):
         self.assertNotIn("/c/CC5X.EXE", a)  # neither appends the compiler
         self.assertNotIn("/c/CC5X.EXE", b)
         self.assertEqual(a[1:], b[1:])  # identical past the runner path
+
+
+class RunnerExecutableTests(unittest.TestCase):
+    """Audit #5: doctor must resolve a runner *template*, not treat it as one path."""
+
+    def test_template_with_placeholder_checks_executable_token(self) -> None:
+        # The whole `"<wrapper> {compiler}"` string is not a path; only the first token is.
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "cc5x-run.sh"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            self.assertEqual(
+                build.runner_executable(f"{wrapper} {{compiler}}"),
+                wrapper,
+            )
+
+    def test_missing_wrapper_returns_none(self) -> None:
+        self.assertIsNone(build.runner_executable("/nope/cc5x-run.sh {compiler}"))
+
+    def test_bare_command_resolved_on_path(self) -> None:
+        # `wine {compiler}` — a bare interpreter name is found on $PATH, not on disk verbatim.
+        with unittest.mock.patch.object(build.shutil, "which", return_value="/usr/bin/wine"):
+            self.assertEqual(
+                build.runner_executable("wine {compiler}"), Path("/usr/bin/wine")
+            )
+        with unittest.mock.patch.object(build.shutil, "which", return_value=None):
+            self.assertIsNone(build.runner_executable("wine {compiler}"))
+
+    def test_empty_and_unparseable_specs_return_none(self) -> None:
+        self.assertIsNone(build.runner_executable(""))
+        self.assertIsNone(build.runner_executable('"unterminated'))
+
+    def test_leading_placeholder_has_no_executable(self) -> None:
+        self.assertIsNone(build.runner_executable("{compiler} -a"))
+
+    def test_doctor_reports_template_runner_as_present(self) -> None:
+        # The end-to-end audit-#5 symptom: a CC5X_RUNNER template reported runner missing.
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "cc5x-run.sh"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            with unittest.mock.patch.dict(
+                os.environ, {"CC5X_RUNNER": f"{wrapper} {{compiler}}"}
+            ):
+                report = build.environment_report()
+        self.assertTrue(report["runner_exists"])
+        self.assertEqual(report["runner"], f"{wrapper} {{compiler}}")
 
 
 class ConfigCommentSanitizationTests(unittest.TestCase):
