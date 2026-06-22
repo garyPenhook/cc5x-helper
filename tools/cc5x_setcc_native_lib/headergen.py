@@ -26,8 +26,13 @@ def _safe_identifier(name: str) -> str:
 
 
 def _safe_comment(text: str) -> str:
-    """Collapse untrusted text to a single line safe inside a ``//`` comment."""
-    return " ".join(text.split())
+    """Collapse untrusted text to a single line safe inside a ``//`` comment.
+
+    Backslashes are stripped as well as newlines: a trailing backslash would splice
+    the following generated line into the comment (C line-continuation runs before
+    comments are recognized), which could swallow a subsequent #pragma/#endif.
+    """
+    return " ".join(text.replace("\\", " ").split())
 
 
 ENHANCED_PREDEFINED_REGISTERS = {

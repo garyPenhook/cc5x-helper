@@ -398,18 +398,36 @@ def _read_zip_member_capped(
     return data
 
 
+def _read_text_file_capped(
+    path: Path,
+    encoding: str,
+    max_bytes: int = MAX_PACK_MEMBER_BYTES,
+) -> str:
+    """Read a plain device file with a hard byte cap.
+
+    Requires a regular file (``is_file`` follows symlinks, so a link to /dev/zero, a
+    FIFO, or any device is rejected) and reads from the open handle rather than
+    trusting a preflight ``stat`` size, so a file that grows after the check, or one
+    whose size is understated, still cannot exhaust memory or block forever.
+    """
+    if not path.is_file():
+        raise ValueError(f"not a regular file: {path}")
+    with open(path, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"refusing to read oversized device file {str(path)!r} "
+            f"(exceeds {max_bytes}-byte limit)"
+        )
+    return data.decode(encoding)
+
+
 def read_text_reference(reference: str, encoding: str = "utf-8") -> str:
     if "!/" in reference:
         archive_name, member_name = reference.split("!/", 1)
         with zipfile.ZipFile(archive_name) as archive:
             return _read_zip_member_capped(archive, member_name).decode(encoding)
-    path = Path(reference)
-    if path.stat().st_size > MAX_PACK_MEMBER_BYTES:
-        raise ValueError(
-            f"refusing to read oversized device file {reference!r} "
-            f"({path.stat().st_size} bytes exceeds {MAX_PACK_MEMBER_BYTES}-byte limit)"
-        )
-    return path.read_text(encoding=encoding)
+    return _read_text_file_capped(Path(reference), encoding)
 
 
 def find_device_in_unpacked_packs(
