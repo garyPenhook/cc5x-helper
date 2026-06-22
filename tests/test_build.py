@@ -385,6 +385,92 @@ def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
     return symbol
 
 
+class BuildCommandTests(unittest.TestCase):
+    """Audit #3: runner is a `{compiler}` command template, not filename-coupled."""
+
+    def test_no_runner_invokes_compiler_directly(self) -> None:
+        self.assertEqual(
+            build.build_command("/c/CC5X.EXE", "main.c", ["-a"], []),
+            ["/c/CC5X.EXE", "-a", "main.c"],
+        )
+
+    def test_placeholder_substituted_and_not_appended(self) -> None:
+        self.assertEqual(
+            build.build_command("/c/CC5X.EXE", "main.c", ["-a"], ["wine", "{compiler}"]),
+            ["wine", "/c/CC5X.EXE", "-a", "main.c"],
+        )
+
+    def test_bare_interpreter_without_placeholder_errors_loudly(self) -> None:
+        # Audit-fix follow-up: a bare `wine` runner must fail with guidance, not silently
+        # drop the compiler (which would invoke wine with no program).
+        with self.assertRaises(SystemExit) as ctx:
+            build.build_command("/c/CC5X.EXE", "main.c", ["-a"], ["wine"])
+        self.assertIn("{compiler}", str(ctx.exception))
+
+    def test_self_contained_runner_omits_compiler(self) -> None:
+        # A placeholder-free wrapper supplies its own compiler (e.g. cc5x-run.sh).
+        self.assertEqual(
+            build.build_command("/c/CC5X.EXE", "main.c", ["-a"], ["/x/cc5x-run.sh"]),
+            ["/x/cc5x-run.sh", "-a", "main.c"],
+        )
+
+    def test_behavior_is_not_filename_coupled(self) -> None:
+        # Renaming the self-contained wrapper must not change how the compiler is handled.
+        a = build.build_command("/c/CC5X.EXE", "m.c", ["-x"], ["/x/cc5x-run.sh"])
+        b = build.build_command("/c/CC5X.EXE", "m.c", ["-x"], ["/x/renamed.sh"])
+        self.assertNotIn("/c/CC5X.EXE", a)  # neither appends the compiler
+        self.assertNotIn("/c/CC5X.EXE", b)
+        self.assertEqual(a[1:], b[1:])  # identical past the runner path
+
+
+class ConfigCommentSanitizationTests(unittest.TestCase):
+    """Audit #1: pack-derived comments must never corrupt the rendered managed block."""
+
+    def _symbol_with_comment(self, comment: str) -> "build.ConfigSymbol":
+        symbol = build.ConfigSymbol(name="FOO")
+        symbol.add(build.ConfigOption(register=1, mask=1, name="FOO", state="ON", comment=comment))
+        return symbol
+
+    def test_newline_and_backslash_collapsed(self) -> None:
+        symbol = self._symbol_with_comment("line one\nline two\\")
+        lines = build.config_lines_for_settings({"FOO": symbol}, {"FOO": "ON"})
+        self.assertEqual(len(lines), 1)  # comment did not splice into extra lines
+        self.assertNotIn("\\", lines[0])
+        self.assertEqual(lines[0], "#pragma config FOO = ON // line one line two")
+
+    def test_non_latin1_replaced(self) -> None:
+        symbol = self._symbol_with_comment("µ-current 5µA — ok \U0001F600")
+        lines = build.config_lines_for_settings({"FOO": symbol}, {"FOO": "ON"})
+        # Whole block must be latin-1 encodable (the source file is written latin-1).
+        lines[0].encode("latin-1")
+
+
+class AtomicWriteTextTests(unittest.TestCase):
+    """Audit #1: a failed write must never truncate the user's existing source file."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_round_trips_content(self) -> None:
+        path = self.dir / "app.c"
+        build.atomic_write_text(path, "void main(void){}\n")
+        self.assertEqual(path.read_text(encoding="latin-1"), "void main(void){}\n")
+
+    def test_encode_failure_leaves_original_intact(self) -> None:
+        path = self.dir / "app.c"
+        path.write_text("ORIGINAL", encoding="latin-1")
+        with self.assertRaises(UnicodeEncodeError):
+            build.atomic_write_text(path, "needs \U0001F600 unicode")
+        # The destination is untouched (no zero-byte truncation) and no temp left behind.
+        self.assertEqual(path.read_text(encoding="latin-1"), "ORIGINAL")
+        leftovers = [p for p in self.dir.iterdir() if p.name != "app.c"]
+        self.assertEqual(leftovers, [])
+
+
 class ManifestConfigDiagnosticsTests(unittest.TestCase):
     """`manifest_config_diagnostics` flags unknown symbols / illegal values per edition."""
 
@@ -666,6 +752,56 @@ class ProgramJsonCaptureTests(unittest.TestCase):
         payload = json.loads(printed_text)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["stdout"], "flash ok\n")
+
+
+class IpecmdFailureGuidanceTests(unittest.TestCase):
+    """Phase 5: a non-zero IPECMD run yields actionable, tool-aware guidance."""
+
+    def test_always_returns_full_checklist(self) -> None:
+        hints = build.ipecmd_failure_guidance("", "", "PK4")
+        self.assertGreaterEqual(len(hints), 3)
+        joined = "\n".join(hints).lower()
+        self.assertIn("usb permission", joined)  # Linux perms covered
+        self.assertIn("pk4", joined)  # mentions the actual tool code
+        self.assertIn("device", joined)  # unsupported-device covered
+
+    def test_connection_failure_leads_checklist(self) -> None:
+        hints = build.ipecmd_failure_guidance("Unable to connect to tool", "", "PPK5")
+        self.assertIn("could not talk to the programmer", hints[0].lower())
+
+    def test_unsupported_device_hint(self) -> None:
+        hints = build.ipecmd_failure_guidance("Device not found in this version", "", "SNAP")
+        self.assertTrue(any("not be supported" in h for h in hints))
+
+    def test_no_duplicate_when_match_overlaps_checklist(self) -> None:
+        hints = build.ipecmd_failure_guidance("no tool detected", "", "PK4")
+        self.assertEqual(len(hints), len(set(hints)))
+
+
+class ProgramFailureGuidanceTests(unittest.TestCase):
+    """A failing IPECMD run surfaces a structured error + guidance in the JSON payload."""
+
+    def test_nonzero_exit_emits_error_and_guidance(self) -> None:
+        fake = types.SimpleNamespace(returncode=1, stdout="Unable to connect to tool\n", stderr="")
+        args = types.SimpleNamespace(
+            action="program", project=None, edition=None, device="PIC16F1509", hex=None,
+            tool="PK4", ipecmd="/fake/ipecmd.sh", release_from_reset=False, ipe_arg=None,
+            dry_run=False, json=True,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            hexfile = Path(tmp) / "app.hex"
+            hexfile.write_text(":00000001FF\n", encoding="ascii")
+            args.hex = str(hexfile)
+            with unittest.mock.patch.object(build.subprocess, "run", return_value=fake), \
+                 unittest.mock.patch("builtins.print") as printed:
+                rc = build.cmd_program(args)
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], 1)
+        self.assertEqual(payload["error"]["kind"], "ipecmd_failed")
+        self.assertTrue(payload["guidance"])
+        self.assertIn("could not talk to the programmer", payload["guidance"][0].lower())
 
 
 class DeviceShortNameTests(unittest.TestCase):

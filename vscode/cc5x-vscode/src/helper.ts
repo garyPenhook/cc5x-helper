@@ -97,6 +97,11 @@ export function helperPath(root: vscode.WorkspaceFolder): string {
   return path.isAbsolute(configured) ? configured : path.join(root.uri.fsPath, configured);
 }
 
+/** The configured helper path as-is (relative), for embedding in workspace-relative tasks. */
+export function helperRelPath(): string {
+  return config().get<string>('helperPath', 'tools/cc5x_setcc_native.py');
+}
+
 /** Workspace-relative manifest path (as the user configured it). */
 export function manifestRelPath(): string {
   return config().get<string>('manifest', 'setcc-native.json');
@@ -110,6 +115,14 @@ export function manifestAbsPath(root: vscode.WorkspaceFolder): string {
 
 export function programmerTool(): string {
   return config().get<string>('programmerTool', 'PK4');
+}
+
+/**
+ * Explicit IPECMD launcher path, or '' to let the helper auto-discover it (from
+ * `$CC5X_IPECMD` or the newest installed MPLAB X). Passed to `program` as `--ipecmd`.
+ */
+export function ipecmdPath(): string {
+  return config().get<string>('ipecmdPath', '').trim();
 }
 
 /** Timeout (ms) before a spawned helper/IPECMD child is killed; 0 disables. */
@@ -144,7 +157,11 @@ export function runHelper(
     let stderr = '';
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    // Settle exactly once and always clear the timer / kill a runaway child, so a hung
+    let killTimer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    const timeoutError = (): Error =>
+      new Error(`CC5X command timed out after ${timeoutMs / 1000}s: ${command} ${fullArgs.join(' ')}`);
+    // Settle exactly once and always clear the timers / kill a runaway child, so a hung
     // python/IPECMD (e.g. waiting on absent hardware) can never leave the command
     // pending forever or orphan the process.
     const finish = (action: () => void): void => {
@@ -154,6 +171,9 @@ export function runHelper(
       settled = true;
       if (timer) {
         clearTimeout(timer);
+      }
+      if (killTimer) {
+        clearTimeout(killTimer);
       }
       action();
     };
@@ -170,12 +190,18 @@ export function runHelper(
       }
       child.kill(signal);
     };
+    // Grace period between the polite SIGTERM and the forced SIGKILL on timeout.
+    const KILL_GRACE_MS = 2000;
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
+        timedOut = true;
+        // Politely ask the child (group) to exit; if it ignores SIGTERM, escalate to
+        // SIGKILL, then force-settle so a truly unkillable child can't hang the promise.
         killTree('SIGTERM');
-        finish(() =>
-          reject(new Error(`CC5X command timed out after ${timeoutMs / 1000}s: ${command} ${fullArgs.join(' ')}`)),
-        );
+        killTimer = setTimeout(() => {
+          killTree('SIGKILL');
+          killTimer = setTimeout(() => finish(() => reject(timeoutError())), KILL_GRACE_MS);
+        }, KILL_GRACE_MS);
       }, timeoutMs);
     }
     child.stdout.on('data', (data: Buffer) => {
@@ -189,7 +215,11 @@ export function runHelper(
       channel?.append(text);
     });
     child.on('error', (err) => finish(() => reject(err)));
-    child.on('close', (code) => finish(() => resolve({ code: code ?? -1, stdout, stderr })));
+    // After a timeout the child is being killed; once it actually exits, reject with the
+    // timeout error (not a misleading successful/failed result from the killed process).
+    child.on('close', (code) =>
+      finish(() => (timedOut ? reject(timeoutError()) : resolve({ code: code ?? -1, stdout, stderr }))),
+    );
   });
 }
 
@@ -311,6 +341,32 @@ export function generateHeader(
 ): Promise<GenerateHeaderResult> {
   return runHelperJson<GenerateHeaderResult>(root, [
     'project-generate-header',
+    '--project',
+    manifestAbsPath(root),
+  ]);
+}
+
+export interface IntellisenseResult {
+  ok: boolean;
+  device?: string;
+  shim?: string;
+  compile_commands?: string;
+  defines?: Record<string, string>;
+  sources?: string[];
+  error?: { kind: string; message: string };
+}
+
+/**
+ * Generate the editor-only IntelliSense shim + `compile_commands.json` for the project,
+ * via `intellisense --json`. These quiet CC5X-dialect false positives in the editor; the
+ * CC5X build remains authoritative. Returns `{ok:false, error}` on failure (e.g. a device
+ * whose pack metadata cannot be resolved).
+ */
+export function refreshIntellisense(
+  root: vscode.WorkspaceFolder,
+): Promise<IntellisenseResult> {
+  return runHelperJson<IntellisenseResult>(root, [
+    'intellisense',
     '--project',
     manifestAbsPath(root),
   ]);

@@ -40,12 +40,38 @@ jobs:
         python -m pip install -e ".[gui]" || echo "PyQt6 unavailable on this Python; GUI tests will skip"
     - name: Lint with flake8
       run: |
-        # stop the build if there are Python syntax errors or undefined names
+        # Hard gate 1: syntax errors / undefined names / f-string bugs fail the build.
         python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        python -m flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        # Hard gate 2: every substantive lint finding (unused imports, bad comparisons,
+        # etc.) fails the build too — only line-length (E501) stays advisory below.
+        # Excludes/line-length come from the checked-in .flake8 config.
+        python -m flake8 . --count --extend-ignore=E501 --statistics
+        # Advisory: line-length report (does not fail the build).
+        python -m flake8 . --count --select=E501 --exit-zero --statistics
     - name: Test with pytest
       env:
         QT_QPA_PLATFORM: offscreen
       run: |
         python -m pytest
+
+  extension:
+    # Build the VS Code companion extension under strict TypeScript so a broken
+    # extension can't merge to main (the Python job alone never compiled it).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode/cc5x-vscode
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: vscode/cc5x-vscode/package-lock.json
+    - name: Install dependencies
+      run: npm ci
+    - name: Compile (strict tsc)
+      run: npm run compile
+    - name: Package VSIX
+      run: npx --yes @vscode/vsce package --no-dependencies -o cc5x-vscode.vsix

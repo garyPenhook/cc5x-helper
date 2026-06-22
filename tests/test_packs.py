@@ -11,6 +11,7 @@ try:
     from cc5x_setcc_native_lib.packs import (
         discover_pack_roots,
         find_device_in_atpacks,
+        find_device_in_unpacked_packs,
         is_cc5x_device,
         list_devices_in_atpacks,
         list_devices_in_unpacked_packs,
@@ -31,6 +32,7 @@ except ModuleNotFoundError:
     from tools.cc5x_setcc_native_lib.packs import (
         discover_pack_roots,
         find_device_in_atpacks,
+        find_device_in_unpacked_packs,
         is_cc5x_device,
         list_devices_in_atpacks,
         list_devices_in_unpacked_packs,
@@ -404,6 +406,18 @@ class UnpackedPackDiscoveryTests(unittest.TestCase):
             result = list_devices_in_unpacked_packs([root])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["pack_version"], "1.10.1")
+
+    def test_finds_ini_in_unpacked_pack(self) -> None:
+        # Audit #7: the .ini (ARCH/SFR/RAM) must be discovered for a pack-cache-only install,
+        # not only via the slower MPLAB-install fallback.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ini_dir = root / "PIC12-16F1xxx_DFP" / "1.8.254" / "xc8" / "pic" / "dat" / "ini"
+            ini_dir.mkdir(parents=True)
+            (ini_dir / "16f1509.ini").write_text("[16F1509]\nARCH=PIC14E\n", encoding="latin-1")
+            result = find_device_in_unpacked_packs("PIC16F1509", [root])
+        self.assertIsNotNone(result["ini"])
+        self.assertTrue(result["ini"].endswith("16f1509.ini"))
 
     def test_discover_pack_roots_env_override_is_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

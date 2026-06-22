@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garyPenhook/cc5x-helper.git",
+    "directory": "vscode/cc5x-vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/garyPenhook/cc5x-helper/issues"
+  },
   "engines": {
     "vscode": "^1.84.0"
   },
@@ -27,6 +35,7 @@
       { "command": "cc5x.editConfig", "title": "Edit Config", "category": "CC5X" },
       { "command": "cc5x.syncConfig", "title": "Sync Config", "category": "CC5X" },
       { "command": "cc5x.generateHeader", "title": "Generate Header", "category": "CC5X" },
+      { "command": "cc5x.refreshIntellisense", "title": "Refresh IntelliSense", "category": "CC5X" },
       { "command": "cc5x.generateTasks", "title": "Generate VS Code Tasks", "category": "CC5X" },
       { "command": "cc5x.refreshArtifacts", "title": "Refresh Artifacts", "category": "CC5X", "icon": "$(refresh)" },
       { "command": "cc5x.openArtifact", "title": "Open Artifact", "category": "CC5X" }
@@ -65,6 +74,11 @@
           "type": "string",
           "default": "PK4",
           "description": "IPECMD -TP tool code (PK4=PICkit 4, PK5=PICkit 5, SNAP, ICD4)."
+        },
+        "cc5x.ipecmdPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the IPECMD launcher (ipecmd.sh). Leave empty to auto-discover it from $CC5X_IPECMD or the newest installed MPLAB X."
         },
         "cc5x.commandTimeoutSeconds": {
           "type": "number",

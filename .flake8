@@ -1,0 +1,17 @@
+[flake8]
+# GitHub's editor is 127 columns; match that rather than the 79 default so the
+# documented `flake8` command is reproducible and reports real issues, not wrapping.
+max-line-length = 127
+# Never lint vendored / generated / build output (a stray local .venv otherwise
+# floods the report with third-party findings and makes the gate meaningless).
+extend-exclude =
+    .venv,
+    venv,
+    build,
+    dist,
+    out,
+    node_modules,
+    *.egg-info,
+    .crossover-i386,
+    generated,
+    generated_headers

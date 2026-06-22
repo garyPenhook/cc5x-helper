@@ -18,6 +18,14 @@ programming.
 - **CC5X: Program Device** — programs a built `.hex` via IPECMD (with a confirmation prompt).
 - **CC5X: Select Device** — pick a target PIC from the locally discovered packs
   (`list-devices --json`) and write it to the manifest (`project-edit --device`).
+- **CC5X: Refresh IntelliSense** — generates an editor-only CC5X dialect shim
+  (`generated/vscode/cc5x_intellisense.h`) and `compile_commands.json` (`intellisense --json`),
+  then points the Microsoft C/C++ extension at it (`C_Cpp.default.compileCommands`). This quiets
+  false "unknown type / undeclared identifier" errors for CC5X keywords (`uns8`, `bit`, `bank0..63`,
+  `interrupt`, intrinsics like `clrwdt`/`nop`, …). **Editor-only and non-authoritative** — the CC5X
+  build remains the source of truth. _Residual noise:_ CC5X's absolute-address syntax
+  `char PORTA @ 0xC;` in the generated device headers has no standard-C form and is still flagged.
+  clangd users: set `--compile-commands-dir` to the printed `generated/vscode` directory.
 - **CC5X: Generate VS Code Tasks** — writes `.vscode/tasks.json` (build + program/erase/verify).
 - **Task support** — `CC5X: Generate VS Code Tasks` writes concrete build/program/verify/erase
   tasks to `.vscode/tasks.json`; the `type: cc5x` provider only resolves hand-authored tasks.
@@ -31,6 +39,7 @@ programming.
 | `cc5x.helperPath` | `tools/cc5x_setcc_native.py` | Workspace-relative helper path. |
 | `cc5x.manifest` | `setcc-native.json` | Workspace-relative manifest path. |
 | `cc5x.programmerTool` | `PK4` | IPECMD `-TP` code (PK4=PICkit 4, PK5=PICkit 5, SNAP, ICD4). |
+| `cc5x.ipecmdPath` | `""` | IPECMD launcher path; empty auto-discovers (`$CC5X_IPECMD` / newest MPLAB X). |
 
 ## Develop
 

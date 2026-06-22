@@ -153,6 +153,58 @@ class ProjectFileTests(unittest.TestCase):
                 load_project_file(path)
             self.assertIn("'config' must be an object", str(ctx.exception))
 
+    def test_load_rejects_non_string_required_field(self) -> None:
+        # Audit #4: a numeric/object value for a string field must be rejected, not coerced.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, main_source=123)
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'main_source' must be a string", str(ctx.exception))
+
+    def test_load_rejects_object_device(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, device={"x": 1})
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'device' must be a string", str(ctx.exception))
+
+    def test_load_rejects_non_string_config_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(
+                path, editions={"production": {"config": {"BOREN": 1}, "build_options": []}}
+            )
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("config value for 'BOREN' must be a string", str(ctx.exception))
+
+    def test_load_rejects_non_string_build_option_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, build_options=["-a", 5])
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("must be an array of strings", str(ctx.exception))
+
+    def test_load_rejects_null_header_path(self) -> None:
+        # A null header.path must be a clean ValueError, not a later TypeError in path joins.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, header={"mode": "generated", "path": None})
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'header.path' must be a string", str(ctx.exception))
+
+    def test_load_rejects_non_integer_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            self._write_manifest(path, version="1")
+            with self.assertRaises(ValueError) as ctx:
+                load_project_file(path)
+            self.assertIn("'version' must be an integer", str(ctx.exception))
+
     def test_can_copy_and_delete_editions(self) -> None:
         project = default_project_manifest(
             device="PIC16F1509",

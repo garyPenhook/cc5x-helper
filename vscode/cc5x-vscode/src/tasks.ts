@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { helperPath, manifestAbsPath, pythonPath } from './helper';
 
 interface Cc5xTaskDefinition extends vscode.TaskDefinition {
@@ -9,11 +10,26 @@ interface Cc5xTaskDefinition extends vscode.TaskDefinition {
 
 const TASK_SOURCE = 'CC5X';
 
-/** Build a `ProcessExecution` that runs `helper build --project <m> --edition <e>`. */
-function buildExecution(root: vscode.WorkspaceFolder, edition: string): vscode.ProcessExecution {
+/**
+ * Build a `ProcessExecution` that runs `helper build --project <m> --edition <e>`.
+ *
+ * Honors an optional per-task `project` manifest override (resolved against the workspace
+ * folder when relative); falls back to the configured `cc5x.manifest` otherwise.
+ */
+function buildExecution(
+  root: vscode.WorkspaceFolder,
+  edition: string,
+  project?: string,
+): vscode.ProcessExecution {
+  const manifest =
+    project && project.trim()
+      ? path.isAbsolute(project)
+        ? project
+        : path.join(root.uri.fsPath, project)
+      : manifestAbsPath(root);
   return new vscode.ProcessExecution(
     pythonPath(),
-    [helperPath(root), 'build', '--project', manifestAbsPath(root), '--edition', edition],
+    [helperPath(root), 'build', '--project', manifest, '--edition', edition],
     { cwd: root.uri.fsPath },
   );
 }
@@ -46,7 +62,7 @@ export class Cc5xTaskProvider implements vscode.TaskProvider {
       task.scope ?? this.root,
       `Build ${definition.edition}`,
       TASK_SOURCE,
-      buildExecution(this.root, definition.edition),
+      buildExecution(this.root, definition.edition, definition.project),
       '$cc5x',
     );
     resolved.group = vscode.TaskGroup.Build;

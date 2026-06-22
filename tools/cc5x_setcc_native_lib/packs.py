@@ -58,6 +58,18 @@ def normalize_device_name(device: str) -> str:
     return text
 
 
+def device_short_name(device: str) -> str:
+    """Device name without the leading ``PIC`` prefix.
+
+    IPECMD and CC5X both expect ``16F1509`` rather than ``PIC16F1509`` for PIC parts,
+    while AVR/SAM names (e.g. ``ATSAML11E16A``) are passed through unchanged. This is the
+    single source of truth shared by the build/program ``-p``/``-P`` args and the editor's
+    per-device ``_<short>`` IntelliSense macro.
+    """
+    normalized = normalize_device_name(device)
+    return normalized[3:] if normalized.startswith("PIC") else normalized
+
+
 def _env_path_list(*names: str) -> list[Path]:
     """Return paths from the first set environment variable in `names`.
 
@@ -484,6 +496,8 @@ def find_device_in_unpacked_packs(
         f"{normalized[3:]}.atdf" if normalized.startswith("PIC") else f"{normalized}.atdf",
         f"{normalized.lower()}.cfgdata",
         f"{normalized[3:].lower()}.cfgdata" if normalized.startswith("PIC") else f"{normalized.lower()}.cfgdata",
+        f"{normalized.lower()}.ini",
+        f"{normalized[3:].lower()}.ini" if normalized.startswith("PIC") else f"{normalized.lower()}.ini",
     }
     best_match: dict[str, str | None] | None = None
     best_version: tuple[int, ...] | None = None
@@ -495,7 +509,10 @@ def find_device_in_unpacked_packs(
             version_dirs = sorted((path for path in family_dir.iterdir() if path.is_dir()), reverse=True)
             for version_dir in version_dirs:
                 version_key = parse_version(version_dir.name)
-                for rel_dir in ("edc", "atdf", "xc8/avr/cfgdata", "xc8/pic/dat/cfgdata", "cfgdata"):
+                for rel_dir in (
+                    "edc", "atdf", "xc8/avr/cfgdata", "xc8/pic/dat/cfgdata", "cfgdata",
+                    "xc8/pic/dat/ini", "ini",
+                ):
                     search_dir = version_dir / rel_dir
                     if not search_dir.exists():
                         continue
@@ -530,6 +547,10 @@ def find_device_in_unpacked_packs(
                             best_match["atdf"] = str(candidate)
                         elif suffix.lower() == ".cfgdata" and best_match["cfgdata"] is None:
                             best_match["cfgdata"] = str(candidate)
+                        elif suffix.lower() == ".ini" and best_match["ini"] is None:
+                            # The .ini carries ARCH/SFR/RAM metadata; without it a pack-cache-only
+                            # install would generate headers missing the device architecture.
+                            best_match["ini"] = str(candidate)
     if best_match:
         return best_match
     return _empty_result(normalized)

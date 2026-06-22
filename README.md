@@ -119,17 +119,22 @@ export CC5X_COMPILER="$HOME/tools/CC5X/CC5X.EXE"
 
 ### 2. Provide a runner (how the Windows compiler is launched)
 
-The **runner** is the launcher that executes the Windows `CC5X.EXE` on Linux. It is
-a command prefix placed in front of the compiler invocation. The simplest runner is
-plain Wine; a CrossOver bottle works through a small wrapper script.
+The **runner** is the launcher that executes the Windows `CC5X.EXE` on Linux. It is a
+command *template*: the compiler path is inserted wherever you write the `{compiler}`
+placeholder. If the runner has no `{compiler}` placeholder it is treated as
+**self-contained** — i.e. it already knows which compiler to run — and only the CC5X
+options and the source file are appended. (This replaces an older rule that keyed off the
+runner's filename, so renaming a wrapper no longer changes behavior.)
 
-Minimal Wine runner — just set the runner to `wine`:
+Minimal Wine runner — Wine needs the compiler path, so include the placeholder (a bare
+`wine` runner without it fails with a clear "add the `{compiler}` placeholder" error):
 
 ```bash
-uv run cc5x-helper build --project setcc-native.json --edition production --runner wine
+uv run cc5x-helper build --project setcc-native.json --edition production --runner "wine {compiler}"
 ```
 
-Or a reusable wrapper script (handy for CrossOver bottles), e.g. `~/apps/cc5x-run.sh`:
+A pass-through wrapper script (forwards its arguments to Wine/CrossOver) also needs the
+compiler, so invoke it with the placeholder, e.g. `~/apps/cc5x-run.sh {compiler}`:
 
 ```bash
 #!/usr/bin/env bash
@@ -141,8 +146,12 @@ exec wine "$@"
 
 ```bash
 chmod +x ~/apps/cc5x-run.sh
-export CC5X_RUNNER="$HOME/apps/cc5x-run.sh"
+export CC5X_RUNNER="$HOME/apps/cc5x-run.sh {compiler}"
 ```
+
+A **self-contained** wrapper that hard-codes the compiler path internally (like the
+default `cc5x-run.sh`, which runs `'C:\Program Files\...\CC5X.EXE' "$@"`) needs **no**
+placeholder — set the runner to just the script path.
 
 The default runner path is `/home/gary/apps/cc5x-run.sh` and the default CrossOver
 bottle is `~/.cxoffice/CC5X`; override both with the env vars or manifest fields if

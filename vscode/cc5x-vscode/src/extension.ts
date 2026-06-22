@@ -5,17 +5,23 @@ import {
   DeviceInfo,
   GenerateHeaderResult,
   HelperResult,
+  IntellisenseResult,
   ProjectInfo,
   generateHeader,
+  refreshIntellisense,
   initProject,
   listDevices,
   listPackConfig,
   PackConfig,
   loadEditionConfig,
   loadProject,
+  ipecmdPath,
+  helperRelPath,
   manifestAbsPath,
+  manifestRelPath,
   manifestWatchPattern,
   programmerTool,
+  pythonPath,
   runHelper,
   runHelperJson,
   setProjectDevice,
@@ -43,6 +49,7 @@ interface ProgramResult {
   stdout?: string;
   stderr?: string;
   error?: { kind: string; message: string };
+  guidance?: string[];
 }
 
 let channel: vscode.OutputChannel;
@@ -86,6 +93,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.editConfig', () => editConfig(root)),
     vscode.commands.registerCommand('cc5x.syncConfig', (uri?: vscode.Uri) => syncConfig(root, uri)),
     vscode.commands.registerCommand('cc5x.generateHeader', () => generateProjectHeader(root)),
+    vscode.commands.registerCommand('cc5x.refreshIntellisense', () => refreshProjectIntellisense(root)),
     vscode.languages.registerCodeLensProvider({ language: 'c' }, configLens),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
@@ -555,6 +563,43 @@ async function generateProjectHeader(root: vscode.WorkspaceFolder | undefined): 
   vscode.window.showInformationMessage(`CC5X: generated header for ${result.device}.`);
 }
 
+async function refreshProjectIntellisense(root: vscode.WorkspaceFolder | undefined): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  let result: IntellisenseResult;
+  try {
+    result = await refreshIntellisense(root);
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not refresh IntelliSense: ${String(err)}`);
+    return;
+  }
+  if (!result.ok || !result.compile_commands) {
+    vscode.window.showErrorMessage(
+      `CC5X: refresh IntelliSense failed: ${result.error?.message ?? 'unknown error'}.`,
+    );
+    return;
+  }
+  // Settings helper: point the Microsoft C/C++ extension at the generated compile database
+  // (a workspace-relative ${workspaceFolder} path so the setting is portable). Best-effort —
+  // a failure here (e.g. the C/C++ extension is absent) must not fail the generation itself.
+  const rel = path.relative(root.uri.fsPath, result.compile_commands).split(path.sep).join('/');
+  const settingValue = `\${workspaceFolder}/${rel}`;
+  try {
+    await vscode.workspace
+      .getConfiguration('C_Cpp', root.uri)
+      .update('default.compileCommands', settingValue, vscode.ConfigurationTarget.WorkspaceFolder);
+  } catch (err) {
+    channel.appendLine(`CC5X: generated IntelliSense but could not set C_Cpp.default.compileCommands: ${String(err)}`);
+  }
+  channel.appendLine(`CC5X: IntelliSense shim ${result.shim}`);
+  channel.appendLine(`CC5X: IntelliSense compile DB ${result.compile_commands}`);
+  vscode.window.showInformationMessage(
+    `CC5X: IntelliSense refreshed for ${result.device}. ` +
+      `clangd users: set --compile-commands-dir to ${path.dirname(rel)}.`,
+  );
+}
+
 async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void> {
   if (!ensureTrusted() || !requireRoot(root)) {
     return;
@@ -610,7 +655,7 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
   }
   channel.show(true);
   try {
-    const result = await runHelperJson<ProgramResult>(root, [
+    const programArgs = [
       'program',
       '--project',
       manifestAbsPath(root),
@@ -618,7 +663,13 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
       edition,
       '--tool',
       tool,
-    ]);
+    ];
+    // Honor an explicit IPECMD path; empty means let the helper auto-discover it.
+    const ipecmd = ipecmdPath();
+    if (ipecmd) {
+      programArgs.push('--ipecmd', ipecmd);
+    }
+    const result = await runHelperJson<ProgramResult>(root, programArgs);
     // IPECMD's own output is captured into the JSON payload (helper --json). Echo it to
     // the channel so the user can see the flash log even though it no longer streams.
     if (result.stdout) {
@@ -631,6 +682,15 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
       vscode.window.showInformationMessage(`CC5X: programmed ${edition} via ${tool}.`);
     } else {
       const message = result.error?.message ?? `IPECMD exited ${result.returncode ?? '?'}`;
+      // Surface the helper's troubleshooting guidance in the channel (no tool detected,
+      // USB permissions, unsupported device) so the user has next steps, not just a code.
+      if (result.guidance?.length) {
+        channel.appendLine('');
+        channel.appendLine('CC5X: program failed — troubleshooting:');
+        for (const hint of result.guidance) {
+          channel.appendLine(`  - ${hint}`);
+        }
+      }
       vscode.window.showErrorMessage(`CC5X program failed: ${message}. See the CC5X output channel.`);
     }
   } catch (err) {
@@ -644,9 +704,22 @@ async function generateTasks(root: vscode.WorkspaceFolder | undefined): Promise<
   }
   channel.show(true);
   try {
+    // Pass the configured interpreter/helper/manifest and the $cc5x matcher so the generated
+    // tasks honor the user's settings, and write to the workspace .vscode (not the manifest's
+    // subdirectory) with workspace-relative embedded paths (tasks run with cwd=workspaceFolder).
+    const outputPath = path.join(root.uri.fsPath, '.vscode', 'tasks.json');
     const result = await runHelper(
       root,
-      ['vscode-tasks', '--project', manifestAbsPath(root), '--tool', programmerTool()],
+      [
+        'vscode-tasks',
+        '--project', manifestAbsPath(root),
+        '--manifest', manifestRelPath(),
+        '--python', pythonPath(),
+        '--helper', helperRelPath(),
+        '--problem-matcher', '$cc5x',
+        '--tool', programmerTool(),
+        '--output', outputPath,
+      ],
       channel,
     );
     if (result.code === 0) {

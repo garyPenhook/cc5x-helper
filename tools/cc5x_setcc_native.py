@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -28,8 +29,13 @@ try:
         mplabx_version_dirs,
         normalize_device_name,
         parse_version,
+        device_short_name,
     )
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from cc5x_setcc_native_lib.intellisense import (
+        DEFAULT_CC5X_VERSION,
+        build_intellisense,
+    )
     from cc5x_setcc_native_lib.project import (
         delete_project_edition,
         default_project_manifest,
@@ -59,8 +65,13 @@ except ModuleNotFoundError:
         mplabx_version_dirs,
         normalize_device_name,
         parse_version,
+        device_short_name,
     )
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from tools.cc5x_setcc_native_lib.intellisense import (
+        DEFAULT_CC5X_VERSION,
+        build_intellisense,
+    )
     from tools.cc5x_setcc_native_lib.project import (
         delete_project_edition,
         default_project_manifest,
@@ -195,6 +206,48 @@ def default_pack_symbol_values(metadata) -> dict[str, str]:
     return defaults
 
 
+def _safe_config_comment(text: str) -> str:
+    """Collapse a pack-derived config comment to a single, write-safe line.
+
+    Pack metadata is untrusted: a newline would break out of the ``//`` comment, a trailing
+    backslash would line-continue and swallow the next generated line, and a non-latin-1
+    character would raise ``UnicodeEncodeError`` when the managed block is written into the
+    latin-1 source file (truncating it). Strip backslashes, collapse whitespace, and replace
+    any non-encodable character so the rendered block is always safe to write.
+    """
+    collapsed = " ".join(text.replace("\\", " ").split())
+    return collapsed.encode("latin-1", "replace").decode("latin-1")
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "latin-1") -> None:
+    """Write ``text`` to ``path`` atomically, never leaving a truncated/partial file.
+
+    Encodes up front so an encoding error is raised *before* the destination is touched,
+    then writes a sibling temp file and ``os.replace``s it into place (atomic on the same
+    filesystem). A crash or error mid-write leaves the original file intact — the previous
+    ``write_text`` opened the real file for truncation first, so any failure zeroed it.
+    """
+    data = text.encode(encoding)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        # mkstemp creates the temp at 0600; preserve the original file's permission bits so a
+        # synced source file does not silently lose its group/other access (the previous
+        # in-place write kept them).
+        try:
+            os.chmod(tmp_name, os.stat(path).st_mode)
+        except OSError:
+            pass  # path did not exist (first write) or stat/chmod unsupported — leave default
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def config_lines_for_settings(
     symbols: dict[str, ConfigSymbol],
     settings: dict[str, str],
@@ -213,7 +266,7 @@ def config_lines_for_settings(
             )
         line = f"#pragma config {name} = {state}"
         if option.comment:
-            line += f" // {option.comment}"
+            line += f" // {_safe_config_comment(option.comment)}"
         lines.append(line)
     return lines
 
@@ -377,15 +430,48 @@ def find_device_metadata(device: str, mplab_root: str | None) -> dict[str, str |
     }
 
 
+RUNNER_COMPILER_PLACEHOLDER = "{compiler}"
+
+# Bare interpreters that cannot run CC5X without being handed the compiler path. A
+# placeholder-free runner is otherwise assumed self-contained; flagging these by name turns
+# the common "runner": "wine" mistake into a loud, actionable error instead of silently
+# dropping the compiler (which would invoke the interpreter with no program).
+_BARE_INTERPRETERS = {"wine", "wine64", "wine-stable", "wine-development", "cxrun"}
+
+
 def build_command(
     compiler: str,
     main_file: str,
     options: list[str],
     runner: list[str],
 ) -> list[str]:
-    command = list(runner)
-    if not runner or Path(runner[0]).name != "cc5x-run.sh":
-        command.append(compiler)
+    """Assemble the compiler invocation, treating ``runner`` as a command template.
+
+    The compiler path is inserted via the ``{compiler}`` placeholder so the behavior does
+    not depend on the runner's filename (a previous version special-cased ``cc5x-run.sh``,
+    which silently changed semantics when the wrapper was renamed):
+
+    * no runner -> invoke the compiler directly;
+    * runner contains ``{compiler}`` -> substitute the compiler there (e.g. ``wine {compiler}``);
+    * runner without the placeholder -> treated as self-contained (it supplies its own
+      compiler, like the CrossOver ``cc5x-run.sh`` wrapper that forwards ``$@`` to a hard-coded
+      ``CC5X.EXE``), so only the options + source are passed. A bare interpreter here (e.g.
+      ``wine``) is almost certainly a mistake and raises a clear error rather than silently
+      dropping the compiler.
+
+    In every case the CC5X options and the source file are appended last.
+    """
+    if not runner:
+        return [compiler, *options, main_file]
+    if any(RUNNER_COMPILER_PLACEHOLDER in token for token in runner):
+        command = [token.replace(RUNNER_COMPILER_PLACEHOLDER, compiler) for token in runner]
+    else:
+        if Path(runner[0]).name.lower() in _BARE_INTERPRETERS:
+            raise SystemExit(
+                f"runner {runner[0]!r} needs the compiler path; add the {{compiler}} "
+                f"placeholder, e.g. \"{runner[0]} {{compiler}}\""
+            )
+        command = list(runner)
     command.extend(options)
     command.append(main_file)
     return command
@@ -459,16 +545,6 @@ def build_options_for_project(project, edition, header_path: Path) -> list[str]:
     options.extend(project.base_build_options)
     options.extend(edition.build_options)
     return options
-
-
-def device_short_name(device: str) -> str:
-    """Device name without the leading ``PIC`` prefix.
-
-    IPECMD and CC5X both expect ``16F1509`` rather than ``PIC16F1509`` for PIC parts,
-    while AVR/SAM names (e.g. ``ATSAML11E16A``) are passed through unchanged.
-    """
-    normalized = normalize_device_name(device)
-    return normalized[3:] if normalized.startswith("PIC") else normalized
 
 
 # IPECMD operation flags, verified against `Readme for IPECMD.htm` (MPLAB X v6.30):
@@ -975,7 +1051,7 @@ def cmd_sync_config(args: argparse.Namespace) -> int:
         source_path = project_path_join(project_path, project.config_source)
         original = source_path.read_text(encoding="latin-1")
         updated, replaced = update_managed_block(original, block, family)
-        source_path.write_text(updated, encoding="latin-1")
+        atomic_write_text(source_path, updated)
         action = "updated" if replaced else "appended"
         print(f"{action} managed config block in {source_path}")
         return 0
@@ -993,7 +1069,7 @@ def cmd_sync_config(args: argparse.Namespace) -> int:
     source_path = Path(args.source)
     original = source_path.read_text(encoding="latin-1")
     updated, replaced = update_managed_block(original, block, family)
-    source_path.write_text(updated, encoding="latin-1")
+    atomic_write_text(source_path, updated)
     action = "updated" if replaced else "appended"
     print(f"{action} managed config block in {source_path}")
     return 0
@@ -1062,6 +1138,45 @@ def _program_error(kind: str, message: str, as_json: bool, **details: object) ->
         payload["error"]["details"] = details  # type: ignore[index]
     _emit_program_payload(payload, as_json)
     return 1
+
+
+def ipecmd_failure_guidance(stdout: str, stderr: str, tool: str) -> list[str]:
+    """Actionable troubleshooting hints for a non-zero IPECMD run.
+
+    IPECMD returns 0 on success and a non-zero exit code on failure; its detailed code
+    table is PM3-specific, so we classify on the captured output text (best-effort) and
+    always append a generic checklist covering the three common Linux failure modes the
+    integration cares about: no tool detected, missing USB permissions, and an
+    unsupported/mismatched device. The matched-cause hint (if any) is listed first.
+    """
+    blob = f"{stdout}\n{stderr}".lower()
+    hints: list[str] = []
+    # Conservative substring heuristics — only to *order* the checklist, never the sole
+    # source of help (the full checklist always follows).
+    if any(token in blob for token in ("unable to connect", "failed to get device id", "no tool", "target device id")):
+        hints.append(
+            f"IPECMD could not talk to the programmer. Confirm a {tool} is plugged in, the "
+            "target is powered, and the ICSP wiring (PGC/PGD/MCLR/VDD/VSS) is correct."
+        )
+    if any(token in blob for token in ("not supported", "invalid device", "device not found")):
+        hints.append(
+            "The selected device may not be supported by this tool/IPECMD. Check the "
+            "manifest device name and that its pack is installed (run `doctor`)."
+        )
+    # Generic checklist (deduped against the leading matched hint).
+    checklist = [
+        f"Tool: a {tool} must be connected and the target powered; verify the `-TP` tool "
+        "code matches your programmer (PK4/PPK5/SNAP/ICD4/...).",
+        "USB permissions (Linux): your user needs access to the programmer's USB device — "
+        "install the MPLAB X udev rules and re-plug the tool (a permission error here looks "
+        "like 'no tool detected').",
+        "Device: confirm the manifest device is supported and its pack is installed "
+        "(`doctor` reports the discovered device count).",
+    ]
+    for item in checklist:
+        if item not in hints:
+            hints.append(item)
+    return hints
 
 
 def cmd_program(args: argparse.Namespace) -> int:
@@ -1138,6 +1253,24 @@ def cmd_program(args: argparse.Namespace) -> int:
         completed = subprocess.run(command)
     payload["ok"] = completed.returncode == 0
     payload["returncode"] = completed.returncode
+    if completed.returncode != 0:
+        # Surface the exit code as a structured error plus actionable guidance the extension
+        # can show in the Problems/output channel (TODO Phase 5).
+        guidance = ipecmd_failure_guidance(
+            getattr(completed, "stdout", "") or "",
+            getattr(completed, "stderr", "") or "",
+            args.tool,
+        )
+        payload["error"] = {
+            "kind": "ipecmd_failed",
+            "message": f"IPECMD exited {completed.returncode} for action {action!r}",
+        }
+        payload["guidance"] = guidance
+        if not args.json:
+            # _emit_program_payload prints the `error:` line below; add the hints to stderr.
+            print("troubleshooting:", file=sys.stderr)
+            for hint in guidance:
+                print(f"  - {hint}", file=sys.stderr)
     _emit_program_payload(payload, args.json)
     return completed.returncode
 
@@ -1379,8 +1512,14 @@ def cmd_project_init(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     if project_path.exists() and not args.force:
         raise SystemExit(f"project file already exists: {project_path}")
-    compiler = args.compiler or str(DEFAULT_COMPILER)
-    runner = args.runner if args.runner is not None else str(DEFAULT_RUNNER)
+    # Honor the documented CC5X_COMPILER / CC5X_RUNNER environment overrides (README) so a
+    # manifest is seeded with the user's toolchain, not just the hard-coded repo defaults.
+    # Explicit --compiler/--runner flags still win.
+    compiler = args.compiler or os.environ.get("CC5X_COMPILER") or str(DEFAULT_COMPILER)
+    if args.runner is not None:
+        runner = args.runner
+    else:
+        runner = os.environ.get("CC5X_RUNNER") or str(DEFAULT_RUNNER)
     project = default_project_manifest(
         device=args.device,
         compiler=compiler,
@@ -1570,6 +1709,47 @@ def cmd_project_generate_header(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(f"generated header for {project.device}: {header_path}")
+    return 0
+
+
+def cmd_intellisense(args: argparse.Namespace) -> int:
+    """Generate the editor-only IntelliSense shim + compile database for a project.
+
+    Writes ``generated/vscode/cc5x_intellisense.h`` and ``compile_commands.json`` next
+    to the manifest so a C/C++ editor understands the CC5X dialect. Works for any header
+    mode (the device header directory is added to the include path). Resolves device
+    metadata for the auto-defined macros (``__CC5X__``, ``__CoreSet__``, ``_<short>``).
+    """
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    try:
+        _, metadata = project_metadata(project)
+        # Resolve (and, for generated mode, write) the device header the same way `build`
+        # does, so the include path is correct for supplied headers beside the compiler and
+        # the header actually exists for the editor to include (existing-mode missing header
+        # raises here -> {ok:false}, instead of reporting a misleading success).
+        header_path = ensure_project_header(project_path, project)
+        # Pass the manifest's directory absolute but un-resolved (no symlink follow) so the
+        # generated compile_commands paths match the path the editor opens; build_intellisense
+        # normalizes the rest.
+        result = build_intellisense(
+            Path(os.path.abspath(args.project)).parent,
+            project,
+            metadata,
+            header_path,
+            cc5x_version=args.cc5x_version,
+        )
+    except (SystemExit, Exception) as exc:
+        # Extension-facing JSON boundary: a missing/malformed pack (or unresolvable
+        # device — OSError, ValueError, xml ParseError, zipfile.BadZipFile) becomes the
+        # structured {ok:false} contract, not a traceback. Mirrors cmd_project_generate_header.
+        return _program_error("intellisense_failed", str(exc), args.json)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"IntelliSense for {result['device']}:")
+        print(f"  shim:             {result['shim']}")
+        print(f"  compile_commands: {result['compile_commands']}")
     return 0
 
 
@@ -1827,6 +2007,20 @@ def build_parser() -> argparse.ArgumentParser:
     project_generate_header.add_argument("--project", default="setcc-native.json")
     project_generate_header.add_argument("--json", action="store_true")
     project_generate_header.set_defaults(func=cmd_project_generate_header)
+
+    intellisense = subparsers.add_parser(
+        "intellisense",
+        help="Generate the editor-only IntelliSense shim + compile_commands.json for a project.",
+    )
+    intellisense.add_argument("--project", default="setcc-native.json")
+    intellisense.add_argument(
+        "--cc5x-version",
+        type=int,
+        default=DEFAULT_CC5X_VERSION,
+        help=f"Integer __CC5X__ value to define for the editor (default {DEFAULT_CC5X_VERSION} == v3.8C).",
+    )
+    intellisense.add_argument("--json", action="store_true")
+    intellisense.set_defaults(func=cmd_intellisense)
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",

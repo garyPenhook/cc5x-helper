@@ -9,7 +9,6 @@ import subprocess
 import sys
 import threading
 import traceback
-from argparse import Namespace
 from functools import wraps
 from pathlib import Path
 
@@ -58,6 +57,7 @@ try:
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
         build_command,
+        atomic_write_text,
         build_options_for_project,
         default_pack_symbol_values,
         merged_device_list,
@@ -70,7 +70,6 @@ try:
         project_metadata,
         project_path_join,
         render_config_block_from_symbols,
-        render_dynamic_config_section,
         render_full_header,
         update_managed_block,
     )
@@ -94,6 +93,7 @@ except ModuleNotFoundError:
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
         build_command,
+        atomic_write_text,
         build_options_for_project,
         default_pack_symbol_values,
         merged_device_list,
@@ -106,7 +106,6 @@ except ModuleNotFoundError:
         project_metadata,
         project_path_join,
         render_config_block_from_symbols,
-        render_dynamic_config_section,
         render_full_header,
         update_managed_block,
     )
@@ -1148,6 +1147,19 @@ class ProjectTab(QWidget):
     @gui_action
     def new_project(self) -> None:
         project_path = self.project_path()
+        # Match the CLI (--force) and extension (confirm prompt): never silently clobber an
+        # existing manifest. Ask before overwriting.
+        if project_path.exists():
+            choice = QMessageBox.question(
+                self,
+                "cc5x-helper",
+                f"{project_path} already exists. Overwrite it with a new manifest?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                self.output.write_text(f"cancelled: {project_path} was not overwritten")
+                return
         project = default_project_manifest(
             device=self.device_edit.text().strip() or "PIC16F1509",
             compiler=self.compiler_edit.text().strip() or str(DEFAULT_COMPILER),
@@ -1337,7 +1349,7 @@ class ProjectTab(QWidget):
             )
         original = source_path.read_text(encoding="latin-1")
         updated, replaced = update_managed_block(original, block, "5x")
-        source_path.write_text(updated, encoding="latin-1")
+        atomic_write_text(source_path, updated)
         self.output.write_text(
             f"{'updated' if replaced else 'appended'} managed config block in {source_path}"
         )

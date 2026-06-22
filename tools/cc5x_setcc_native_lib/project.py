@@ -95,6 +95,28 @@ def _require_field(payload: dict, key: str, path: Path) -> object:
     return payload[key]
 
 
+def _require_str(payload: dict, key: str, path: Path) -> str:
+    """Fetch a required string field, rejecting other JSON types instead of coercing them.
+
+    Without this a manifest with ``"main_source": 123`` or ``"device": {...}`` would be
+    silently ``str()``-ed into a valid-looking ``"123"`` / ``"{'...'}"`` and only fail much
+    later (or build the wrong thing). Reject the wrong type at load time.
+    """
+    value = _require_field(payload, key, path)
+    if not isinstance(value, str):
+        raise ValueError(f"{path}: field {key!r} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _optional_str(value: object, label: str, path: Path) -> "str | None":
+    """Validate an optional string field, rejecting non-string JSON types."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{path}: {label} must be a string, got {type(value).__name__}")
+    return value
+
+
 def _as_mapping(value: object, label: str, path: Path) -> dict:
     """Coerce an optional manifest field to a dict, rejecting other JSON shapes cleanly."""
     if value is None:
@@ -114,7 +136,10 @@ def _as_str_list(value: object, label: str, path: Path) -> list[str]:
         return []
     if not isinstance(value, list):
         raise ValueError(f"{path}: {label} must be an array of strings")
-    return [str(item) for item in value]
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{path}: {label} must be an array of strings (got {type(item).__name__})")
+    return list(value)
 
 
 def load_project_file(path: Path) -> ProjectFile:
@@ -130,27 +155,45 @@ def load_project_file(path: Path) -> ProjectFile:
         if not isinstance(item, dict):
             raise ValueError(f"{path}: edition {name!r} must be an object")
         config_raw = _as_mapping(item.get("config"), f"edition {name!r} 'config'", path)
+        config: dict[str, str] = {}
+        for key, value in config_raw.items():
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"{path}: edition {name!r} config value for {key!r} must be a string, "
+                    f"got {type(value).__name__}"
+                )
+            config[str(key)] = value
         editions[name] = ProjectEdition(
             name=name,
-            config={str(key): str(value) for key, value in config_raw.items()},
+            config=config,
             build_options=_as_str_list(
                 item.get("build_options"), f"edition {name!r} 'build_options'", path
             ),
         )
     if "path" not in header:
         raise ValueError(f"{path}: missing required field 'header.path'")
+    if not isinstance(header["path"], str):
+        # header.path is required; a null/numeric value would otherwise become None (or a
+        # bogus "None" path) and blow up later in project_path_join with a raw TypeError.
+        raise ValueError(
+            f"{path}: 'header.path' must be a string, got {type(header['path']).__name__}"
+        )
+    version = payload.get("version", DEFAULT_PROJECT_VERSION)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError(f"{path}: field 'version' must be an integer, got {type(version).__name__}")
+    header_mode = _optional_str(header.get("mode"), "'header.mode'", path) or "generated"
     return ProjectFile(
-        version=int(payload.get("version", DEFAULT_PROJECT_VERSION)),
-        device=normalize_device_name(str(_require_field(payload, "device", path))),
-        compiler=str(_require_field(payload, "compiler", path)),
-        runner=str(payload["runner"]) if payload.get("runner") is not None else None,
-        header_mode=str(header.get("mode", "generated")),
-        header_path=str(header["path"]),
-        config_source=str(_require_field(payload, "config_source", path)),
-        main_source=str(_require_field(payload, "main_source", path)),
+        version=version,
+        device=normalize_device_name(_require_str(payload, "device", path)),
+        compiler=_require_str(payload, "compiler", path),
+        runner=_optional_str(payload.get("runner"), "'runner'", path),
+        header_mode=header_mode,
+        header_path=_optional_str(header["path"], "'header.path'", path),
+        config_source=_require_str(payload, "config_source", path),
+        main_source=_require_str(payload, "main_source", path),
         base_build_options=_as_str_list(payload.get("build_options"), "'build_options'", path),
         editions=editions,
-        mplab_root=str(payload["mplab_root"]) if payload.get("mplab_root") is not None else None,
+        mplab_root=_optional_str(payload.get("mplab_root"), "'mplab_root'", path),
     )
 
 

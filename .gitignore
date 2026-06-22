@@ -10,6 +10,7 @@ dist/
 
 validation/
 generated_headers/
+generated/
 *.hex
 *.occ
 *.asm
