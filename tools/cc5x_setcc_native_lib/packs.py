@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# Device files (.PIC/.cfgdata/.ini/.pdsc) are at most a few MB; cap reads from
+# untrusted `.atpack` archives well above that so a decompression bomb (a tiny
+# archive member that inflates to gigabytes) cannot exhaust memory.
+MAX_PACK_MEMBER_BYTES = 64 * 1024 * 1024
+
 PACK_STEM_RE = re.compile(
     r"^Microchip\.(?P<family>.+)\.(?P<version>\d+\.\d+\.\d+)$"
 )
@@ -363,12 +368,66 @@ def find_device_in_atpacks(
     return _empty_result(normalized)
 
 
+def _read_zip_member_capped(
+    archive: zipfile.ZipFile,
+    member_name: str,
+    max_bytes: int = MAX_PACK_MEMBER_BYTES,
+) -> bytes:
+    """Read a single archive member, refusing decompression bombs.
+
+    The declared size is checked first (cheap), then the stream itself is read with a
+    hard cap so a member whose ZIP header understates its inflated size still cannot
+    blow past the limit. `getinfo` also restricts reads to members the archive really
+    lists, so a crafted reference cannot pull in an unrelated path.
+    """
+    try:
+        info = archive.getinfo(member_name)
+    except KeyError as exc:
+        raise FileNotFoundError(f"archive member not found: {member_name}") from exc
+    if info.file_size > max_bytes:
+        raise ValueError(
+            f"refusing to read oversized archive member {member_name!r} "
+            f"({info.file_size} bytes exceeds {max_bytes}-byte limit)"
+        )
+    with archive.open(info) as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"archive member {member_name!r} exceeds {max_bytes}-byte limit"
+        )
+    return data
+
+
+def _read_text_file_capped(
+    path: Path,
+    encoding: str,
+    max_bytes: int = MAX_PACK_MEMBER_BYTES,
+) -> str:
+    """Read a plain device file with a hard byte cap.
+
+    Requires a regular file (``is_file`` follows symlinks, so a link to /dev/zero, a
+    FIFO, or any device is rejected) and reads from the open handle rather than
+    trusting a preflight ``stat`` size, so a file that grows after the check, or one
+    whose size is understated, still cannot exhaust memory or block forever.
+    """
+    if not path.is_file():
+        raise ValueError(f"not a regular file: {path}")
+    with open(path, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"refusing to read oversized device file {str(path)!r} "
+            f"(exceeds {max_bytes}-byte limit)"
+        )
+    return data.decode(encoding)
+
+
 def read_text_reference(reference: str, encoding: str = "utf-8") -> str:
     if "!/" in reference:
         archive_name, member_name = reference.split("!/", 1)
         with zipfile.ZipFile(archive_name) as archive:
-            return archive.read(member_name).decode(encoding)
-    return Path(reference).read_text(encoding=encoding)
+            return _read_zip_member_capped(archive, member_name).decode(encoding)
+    return _read_text_file_capped(Path(reference), encoding)
 
 
 def find_device_in_unpacked_packs(
@@ -386,7 +445,7 @@ def find_device_in_unpacked_packs(
         f"{normalized[3:].lower()}.cfgdata" if normalized.startswith("PIC") else f"{normalized.lower()}.cfgdata",
     }
     best_match: dict[str, str | None] | None = None
-    best_version: tuple[int, ...] = ()
+    best_version: tuple[int, ...] | None = None
 
     for root in roots:
         if not root.exists():
@@ -401,19 +460,35 @@ def find_device_in_unpacked_packs(
                         continue
                     for filename in filenames:
                         candidate = search_dir / filename
-                        if candidate.exists() and version_key >= best_version:
+                        if not candidate.exists():
+                            continue
+                        # A strictly newer version wins outright and resets the record;
+                        # ties keep the first version dir seen (dirs are sorted newest
+                        # first, roots in priority order).
+                        if best_version is None or version_key > best_version:
                             best_version = version_key
                             best_match = {
                                 "device": normalized,
                                 "pack_family": family_dir.name,
                                 "pack_version": version_dir.name,
                                 "pack_root": str(version_dir),
-                                "pic": str(candidate) if candidate.suffix.upper() == ".PIC" else None,
-                                "atdf": str(candidate) if candidate.suffix.lower() == ".atdf" else None,
-                                "cfgdata": str(candidate) if candidate.suffix.lower() == ".cfgdata" else None,
+                                "pic": None,
+                                "atdf": None,
+                                "cfgdata": None,
                                 "pdsc": None,
                                 "ini": None,
                             }
+                        # Merge files from the same winning version dir so a later
+                        # .cfgdata match does not clobber an earlier .PIC reference.
+                        if best_match is None or best_match["pack_root"] != str(version_dir):
+                            continue
+                        suffix = candidate.suffix
+                        if suffix.upper() == ".PIC" and best_match["pic"] is None:
+                            best_match["pic"] = str(candidate)
+                        elif suffix.lower() == ".atdf" and best_match["atdf"] is None:
+                            best_match["atdf"] = str(candidate)
+                        elif suffix.lower() == ".cfgdata" and best_match["cfgdata"] is None:
+                            best_match["cfgdata"] = str(candidate)
     if best_match:
         return best_match
     return _empty_result(normalized)
