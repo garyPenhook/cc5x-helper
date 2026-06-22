@@ -1408,6 +1408,44 @@ def cmd_project_edit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_generate_header(args: argparse.Namespace) -> int:
+    """Synthesize the device header for a generated-mode project and write it to header.path.
+
+    Reuses ensure_project_header so the file written here is byte-identical to what `build`
+    would generate. Only meaningful for header.mode == "generated"; supplied/existing modes
+    use a provided header and have nothing to synthesize.
+    """
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    if project.header_mode != "generated":
+        return _program_error(
+            "not_generated_mode",
+            f"header.mode is {project.header_mode!r}; only 'generated' projects "
+            "synthesize a header (supplied/existing modes use a provided file)",
+            args.json,
+            mode=project.header_mode,
+        )
+    try:
+        header_path = ensure_project_header(project_path, project)
+    except (SystemExit, Exception) as exc:
+        # This is the extension-facing JSON boundary: turn any header-generation failure
+        # into the structured {ok:false} contract instead of a traceback/SystemExit. The
+        # device metadata path can raise OSError, ValueError (capped reads), xml ParseError,
+        # or zipfile.BadZipFile for a missing/malformed/corrupt pack — all reported uniformly.
+        return _program_error("generate_failed", str(exc), args.json)
+    payload = {
+        "ok": True,
+        "mode": project.header_mode,
+        "device": project.device,
+        "header": str(header_path),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"generated header for {project.device}: {header_path}")
+    return 0
+
+
 def cmd_project_list_editions(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
@@ -1654,6 +1692,14 @@ def build_parser() -> argparse.ArgumentParser:
     project_set_build_options.add_argument("--edition", required=True)
     project_set_build_options.add_argument("--option", action="append")
     project_set_build_options.set_defaults(func=cmd_project_set_build_options)
+
+    project_generate_header = subparsers.add_parser(
+        "project-generate-header",
+        help="Synthesize and write the device header for a generated-mode project.",
+    )
+    project_generate_header.add_argument("--project", default="setcc-native.json")
+    project_generate_header.add_argument("--json", action="store_true")
+    project_generate_header.set_defaults(func=cmd_project_generate_header)
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",

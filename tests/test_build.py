@@ -227,6 +227,77 @@ class ProjectBuildReadinessTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class ProjectGenerateHeaderTests(unittest.TestCase):
+    """`project-generate-header` writes the generated header and refuses other modes."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.compiler = self.dir / "CC5X.EXE"
+        self.compiler.write_text("", encoding="ascii")
+        self.manifest = self.dir / "setcc-native.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_manifest(self, mode: str = "generated") -> None:
+        manifest = {
+            "version": 1,
+            "device": "PIC16F1509",
+            "compiler": str(self.compiler),
+            "runner": None,
+            "header": {"mode": mode, "path": "gen/16F1509.H"},
+            "config_source": "app.c",
+            "main_source": "app.c",
+            "build_options": [],
+            "editions": {"production": {"config": {}, "build_options": []}},
+        }
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _run(self) -> tuple[int, dict]:
+        args = types.SimpleNamespace(project=str(self.manifest), json=True)
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_project_generate_header(args)
+        payload = json.loads("".join(str(call.args[0]) for call in printed.call_args_list))
+        return rc, payload
+
+    def test_generates_header_for_generated_mode(self) -> None:
+        self._write_manifest("generated")
+        # Avoid touching real packs: stub metadata lookup + header render.
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(
+                    build, "render_full_header", return_value="#pragma chip PIC16F1509\n"
+                ):
+            rc, payload = self._run()
+        header = self.dir / "gen" / "16F1509.H"
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(header.is_file())
+        self.assertEqual(Path(payload["header"]), header.resolve())
+        self.assertIn("#pragma chip PIC16F1509", header.read_text(encoding="latin-1"))
+
+    def test_refuses_non_generated_mode(self) -> None:
+        self._write_manifest("existing")
+        rc, payload = self._run()
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["kind"], "not_generated_mode")
+
+    def test_reports_generate_failed_on_metadata_error(self) -> None:
+        # A device absent from / malformed in the packs raises ValueError / xml ParseError /
+        # zipfile.BadZipFile from project_metadata — none an OSError. The JSON contract must
+        # still surface a structured {ok:false, generate_failed} error, not a traceback.
+        self._write_manifest("generated")
+        with unittest.mock.patch.object(
+            build, "project_metadata", side_effect=ValueError("malformed pack")
+        ):
+            rc, payload = self._run()
+        self.assertEqual(rc, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["kind"], "generate_failed")
+        self.assertIn("malformed pack", payload["error"]["message"])
+
+
 class FindDeviceMetadataTests(unittest.TestCase):
     def _result(self, version: str, root: str) -> dict[str, str | None]:
         return {

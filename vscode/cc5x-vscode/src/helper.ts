@@ -274,6 +274,31 @@ export function syncProjectConfig(
   ]);
 }
 
+/** Result of `project-generate-header --json`. */
+export interface GenerateHeaderResult {
+  ok: boolean;
+  mode?: string;
+  device?: string;
+  header?: string;
+  error?: { kind: string; message: string };
+}
+
+/**
+ * Synthesize the device header for a generated-mode project and write it to `header.path`,
+ * via `project-generate-header --json`. Reuses the same logic `build` uses, so the file is
+ * identical to what a build would produce. Returns `{ok:false, error}` for non-generated
+ * projects (which use a provided header) or on failure.
+ */
+export function generateHeader(
+  root: vscode.WorkspaceFolder,
+): Promise<GenerateHeaderResult> {
+  return runHelperJson<GenerateHeaderResult>(root, [
+    'project-generate-header',
+    '--project',
+    manifestAbsPath(root),
+  ]);
+}
+
 /** Set the manifest's target device via `project-edit --device` (validates + writes). */
 export function setProjectDevice(
   root: vscode.WorkspaceFolder,

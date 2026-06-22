@@ -26,6 +26,7 @@
       { "command": "cc5x.selectDevice", "title": "Select Device", "category": "CC5X" },
       { "command": "cc5x.editConfig", "title": "Edit Config", "category": "CC5X" },
       { "command": "cc5x.syncConfig", "title": "Sync Config", "category": "CC5X" },
+      { "command": "cc5x.generateHeader", "title": "Generate Header", "category": "CC5X" },
       { "command": "cc5x.generateTasks", "title": "Generate VS Code Tasks", "category": "CC5X" },
       { "command": "cc5x.refreshArtifacts", "title": "Refresh Artifacts", "category": "CC5X", "icon": "$(refresh)" },
       { "command": "cc5x.openArtifact", "title": "Open Artifact", "category": "CC5X" }

@@ -3,8 +3,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import {
   DeviceInfo,
+  GenerateHeaderResult,
   HelperResult,
   ProjectInfo,
+  generateHeader,
   initProject,
   listDevices,
   listPackConfig,
@@ -77,6 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.selectDevice', () => selectDevice(root)),
     vscode.commands.registerCommand('cc5x.editConfig', () => editConfig(root)),
     vscode.commands.registerCommand('cc5x.syncConfig', (uri?: vscode.Uri) => syncConfig(root, uri)),
+    vscode.commands.registerCommand('cc5x.generateHeader', () => generateProjectHeader(root)),
     vscode.languages.registerCodeLensProvider({ language: 'c' }, configLens),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
@@ -502,6 +505,39 @@ async function syncConfig(
     channel.appendLine(result.stdout + result.stderr);
     vscode.window.showErrorMessage('CC5X: failed to sync config. See the CC5X output channel.');
   }
+}
+
+/**
+ * Generate the device header for a generated-mode project and open it (Phase 3). Writes the
+ * header to the manifest's `header.path` using the same logic `build` uses, so the file is
+ * identical to a build-time header — useful for inspecting it or feeding IntelliSense without
+ * a full build. Non-generated projects (supplied/existing) report that there is nothing to
+ * synthesize.
+ */
+async function generateProjectHeader(root: vscode.WorkspaceFolder | undefined): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  let result: GenerateHeaderResult;
+  try {
+    result = await generateHeader(root);
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not generate header: ${String(err)}`);
+    return;
+  }
+  if (!result.ok || !result.header) {
+    vscode.window.showErrorMessage(
+      `CC5X: generate header failed: ${result.error?.message ?? 'unknown error'}.`,
+    );
+    return;
+  }
+  // Open the freshly generated header so the user can inspect it.
+  try {
+    await vscode.window.showTextDocument(vscode.Uri.file(result.header));
+  } catch (err) {
+    channel.appendLine(`CC5X: generated ${result.header} but could not open it: ${String(err)}`);
+  }
+  vscode.window.showInformationMessage(`CC5X: generated header for ${result.device}.`);
 }
 
 async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void> {
