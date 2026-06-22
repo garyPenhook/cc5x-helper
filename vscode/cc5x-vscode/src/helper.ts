@@ -255,6 +255,25 @@ export function updateEditionConfig(
   return runHelper(root, args);
 }
 
+/**
+ * Regenerate the managed config block in the project's `config_source` from the edition's
+ * stored config + pack defaults, via `sync-config --project ... --edition ...`. The helper
+ * rewrites the file on disk (replacing the existing `// START_CONFIG_SETCC_*.` block or
+ * appending one), so callers should save any unsaved edits to that file first.
+ */
+export function syncProjectConfig(
+  root: vscode.WorkspaceFolder,
+  edition: string,
+): Promise<HelperResult> {
+  return runHelper(root, [
+    'sync-config',
+    '--project',
+    manifestAbsPath(root),
+    '--edition',
+    edition,
+  ]);
+}
+
 /** Set the manifest's target device via `project-edit --device` (validates + writes). */
 export function setProjectDevice(
   root: vscode.WorkspaceFolder,

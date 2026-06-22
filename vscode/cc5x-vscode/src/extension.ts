@@ -17,12 +17,14 @@ import {
   runHelper,
   runHelperJson,
   setProjectDevice,
+  syncProjectConfig,
   updateEditionConfig,
   workspaceRoot,
 } from './helper';
 import { publishCc5xDiagnostics } from './diagnostics';
 import { ArtifactsProvider } from './artifacts';
 import { Cc5xTaskProvider } from './tasks';
+import { Cc5xConfigLensProvider } from './configLens';
 
 interface DoctorReport {
   ready: boolean;
@@ -45,6 +47,7 @@ let diagnostics: vscode.DiagnosticCollection;
 let artifacts: ArtifactsProvider;
 let statusBar: vscode.StatusBarItem;
 let currentProject: ProjectInfo | undefined;
+let configLens: Cc5xConfigLensProvider;
 
 export function activate(context: vscode.ExtensionContext): void {
   const root = workspaceRoot();
@@ -56,6 +59,10 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar.text = '$(circuit-board) CC5X';
   statusBar.tooltip = 'CC5X: run Doctor';
   statusBar.show();
+  configLens = new Cc5xConfigLensProvider(
+    () => root,
+    () => currentProject,
+  );
 
   context.subscriptions.push(
     channel,
@@ -69,6 +76,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.createProject', () => createProject(root)),
     vscode.commands.registerCommand('cc5x.selectDevice', () => selectDevice(root)),
     vscode.commands.registerCommand('cc5x.editConfig', () => editConfig(root)),
+    vscode.commands.registerCommand('cc5x.syncConfig', (uri?: vscode.Uri) => syncConfig(root, uri)),
+    vscode.languages.registerCodeLensProvider({ language: 'c' }, configLens),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
       // Binary artifacts (.hex/.cod/.cof) can't open as text; surface the error
@@ -88,9 +97,11 @@ export function activate(context: vscode.ExtensionContext): void {
       watcher,
       watcher.onDidChange(() => void reloadProject(root)),
       watcher.onDidCreate(() => void reloadProject(root)),
-      // Clear the cached project when the manifest is deleted so stale data is not reused.
+      // Clear the cached project when the manifest is deleted so stale data is not reused,
+      // and re-evaluate the config lens (it must vanish once there is no project).
       watcher.onDidDelete(() => {
         currentProject = undefined;
+        configLens.refresh();
       }),
     );
     // Only auto-run the helper (which executes the workspace-configured interpreter)
@@ -143,6 +154,8 @@ async function reloadProject(root: vscode.WorkspaceFolder): Promise<void> {
     currentProject = undefined;
     channel.appendLine(`CC5X: could not load manifest: ${String(err)}`);
   }
+  // The config_source path may have changed; re-evaluate the Sync Config lens.
+  configLens.refresh();
 }
 
 async function runDoctor(root: vscode.WorkspaceFolder | undefined): Promise<void> {
@@ -432,6 +445,63 @@ async function editConfig(root: vscode.WorkspaceFolder | undefined): Promise<voi
     // loadEditionConfig, and the manifest watcher refreshes currentProject for everything else.
   }
   vscode.window.showInformationMessage(`CC5X: finished editing ${edition} config.`);
+}
+
+/**
+ * Regenerate the managed config block in the project's config source from an edition's
+ * stored config (Phase 3). Backs the "CC5X: Sync Config" CodeLens and the command palette.
+ * The helper rewrites the file on disk, so any unsaved edits to that file are saved first
+ * (otherwise sync-config would read the stale on-disk copy and the editor would then revert
+ * over the user's changes).
+ */
+async function syncConfig(
+  root: vscode.WorkspaceFolder | undefined,
+  uri?: vscode.Uri,
+): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  const edition = await pickEdition(root, 'Select edition to sync config from');
+  if (!edition) {
+    return;
+  }
+  // Save the config source if it is open with unsaved edits, so the helper rewrites the
+  // latest content. Prefer the lens-supplied URI; fall back to the manifest's config_source.
+  const targetPath =
+    uri?.fsPath ??
+    (currentProject
+      ? path.isAbsolute(currentProject.config_source)
+        ? currentProject.config_source
+        : path.join(root.uri.fsPath, currentProject.config_source)
+      : undefined);
+  if (targetPath) {
+    // Normalize both sides: the palette fallback builds targetPath via path.join, which can
+    // differ from the open document's fsPath by separators / '.' / '..' segments. A raw
+    // string mismatch would skip the save and let the helper revert the editor over unsaved
+    // edits — the exact hazard this guard exists to prevent.
+    const target = path.normalize(targetPath);
+    const doc = vscode.workspace.textDocuments.find(
+      (d) => path.normalize(d.uri.fsPath) === target,
+    );
+    if (doc && doc.isDirty) {
+      await doc.save();
+    }
+  }
+  let result: HelperResult;
+  try {
+    result = await syncProjectConfig(root, edition);
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not sync config: ${String(err)}`);
+    return;
+  }
+  if (result.code === 0) {
+    // The helper rewrote the file on disk; VS Code reverts the (now clean) editor to match.
+    vscode.window.showInformationMessage(`CC5X: synced ${edition} config into the managed block.`);
+  } else {
+    channel.show(true);
+    channel.appendLine(result.stdout + result.stderr);
+    vscode.window.showErrorMessage('CC5X: failed to sync config. See the CC5X output channel.');
+  }
 }
 
 async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void> {
