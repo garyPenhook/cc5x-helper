@@ -378,6 +378,140 @@ class ProjectGenerateHeaderTests(unittest.TestCase):
         self.assertIn("malformed pack", payload["error"]["message"])
 
 
+def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
+    symbol = build.ConfigSymbol(name=name)
+    for state in states:
+        symbol.add(build.ConfigOption(register=1, mask=1, name=name, state=state))
+    return symbol
+
+
+class ManifestConfigDiagnosticsTests(unittest.TestCase):
+    """`manifest_config_diagnostics` flags unknown symbols / illegal values per edition."""
+
+    def _project(self, config: dict[str, str]) -> object:
+        return types.SimpleNamespace(
+            device="PIC16F1509",
+            editions={"production": types.SimpleNamespace(name="production", config=config)},
+        )
+
+    def test_empty_config_skips_metadata_lookup(self) -> None:
+        # No config overrides → no pack lookup at all (fast + pack-independent).
+        with unittest.mock.patch.object(build, "project_metadata") as metadata:
+            diags = build.manifest_config_diagnostics(self._project({}))
+        self.assertEqual(diags, [])
+        metadata.assert_not_called()
+
+    def test_unknown_symbol_flagged(self) -> None:
+        symbols = {"BOREN": _config_symbol("BOREN", "ON", "OFF")}
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "pack_config_symbols", return_value=symbols):
+            diags = build.manifest_config_diagnostics(self._project({"NOPE": "ON"}))
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0]["kind"], "unknown_config_symbol")
+        self.assertEqual(diags[0]["symbol"], "NOPE")
+        self.assertEqual(diags[0]["edition"], "production")
+        self.assertEqual(diags[0]["severity"], "error")
+
+    def test_invalid_value_flagged_with_legal_states(self) -> None:
+        symbols = {"BOREN": _config_symbol("BOREN", "ON", "OFF")}
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "pack_config_symbols", return_value=symbols):
+            diags = build.manifest_config_diagnostics(self._project({"BOREN": "MAYBE"}))
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0]["kind"], "invalid_config_value")
+        self.assertEqual(diags[0]["symbol"], "BOREN")
+        self.assertIn("OFF", diags[0]["message"])
+        self.assertIn("ON", diags[0]["message"])
+
+    def test_legal_config_is_clean(self) -> None:
+        symbols = {"BOREN": _config_symbol("BOREN", "ON", "OFF")}
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "pack_config_symbols", return_value=symbols):
+            diags = build.manifest_config_diagnostics(self._project({"BOREN": "ON"}))
+        self.assertEqual(diags, [])
+
+    def test_metadata_failure_emits_no_false_positives(self) -> None:
+        # A missing/malformed pack must not turn every symbol into an "unknown" error.
+        with unittest.mock.patch.object(
+            build, "project_metadata", side_effect=ValueError("malformed pack")
+        ):
+            diags = build.manifest_config_diagnostics(self._project({"BOREN": "ON"}))
+        self.assertEqual(diags, [])
+
+    def test_no_config_symbols_emits_no_false_positives(self) -> None:
+        # Metadata can resolve but expose no config symbols (e.g. cfgdata not found). That
+        # must not flag every user entry as unknown — it means "cannot validate", not "wrong".
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "pack_config_symbols", return_value={}):
+            diags = build.manifest_config_diagnostics(self._project({"BOREN": "ON"}))
+        self.assertEqual(diags, [])
+
+
+class ProjectManifestDiagnosticsTests(unittest.TestCase):
+    """`project-validate --json` surfaces locatable manifest diagnostics + fails on them."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.compiler = self.dir / "CC5X.EXE"
+        self.compiler.write_text("", encoding="ascii")
+        self.manifest = self.dir / "setcc-native.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_manifest(self, *, mode: str, header_path: str, config: dict) -> None:
+        (self.dir / "app.c").write_text("void main(void){}\n", encoding="ascii")
+        manifest = {
+            "version": 1,
+            "device": "PIC16F1509",
+            "compiler": str(self.compiler),
+            "runner": None,
+            "header": {"mode": mode, "path": header_path},
+            "config_source": "app.c",
+            "main_source": "app.c",
+            "build_options": [],
+            "editions": {"production": {"config": config, "build_options": []}},
+        }
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _validate(self) -> tuple[int, dict]:
+        args = types.SimpleNamespace(project=str(self.manifest), json=True)
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_project_validate(args)
+        payload = json.loads("".join(str(call.args[0]) for call in printed.call_args_list))
+        return rc, payload
+
+    def test_missing_existing_header_reports_diagnostic(self) -> None:
+        # `existing` mode + a header path that does not exist → locatable header diagnostic.
+        self._write_manifest(mode="existing", header_path="nope.H", config={})
+        rc, payload = self._validate()
+        self.assertEqual(rc, 1)
+        header_diags = [d for d in payload["diagnostics"] if d["kind"] == "missing_header"]
+        self.assertEqual(len(header_diags), 1)
+        self.assertEqual(header_diags[0]["field"], "header.path")
+
+    def test_invalid_config_value_fails_validation(self) -> None:
+        # A valid-shape manifest whose only fault is an illegal config value must still
+        # fail (exit 1) and surface a locatable diagnostic, even though `errors` is empty.
+        self._write_manifest(mode="generated", header_path="gen/16F1509.H", config={"BOREN": "MAYBE"})
+        symbols = {"BOREN": _config_symbol("BOREN", "ON", "OFF")}
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "pack_config_symbols", return_value=symbols):
+            rc, payload = self._validate()
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["errors"], [])
+        bad = [d for d in payload["diagnostics"] if d["kind"] == "invalid_config_value"]
+        self.assertEqual(len(bad), 1)
+        self.assertEqual(bad[0]["symbol"], "BOREN")
+
+    def test_valid_manifest_has_empty_diagnostics(self) -> None:
+        self._write_manifest(mode="generated", header_path="gen/16F1509.H", config={})
+        rc, payload = self._validate()
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["diagnostics"], [])
+
+
 class FindDeviceMetadataTests(unittest.TestCase):
     def _result(self, version: str, root: str) -> dict[str, str | None]:
         return {

@@ -717,6 +717,104 @@ def project_build_readiness_errors(project_path: Path, project) -> list[str]:
     return errors
 
 
+def manifest_config_diagnostics(project) -> list[dict[str, str]]:
+    """Validate each edition's config NAME/STATE against the device's pack metadata.
+
+    Surfaces the two config-level defects schema validation cannot catch: a symbol the
+    device does not expose (``unknown_config_symbol``) and a value that is not one of that
+    symbol's legal states (``invalid_config_value``). Either would otherwise only fail later,
+    when ``sync-config`` renders the managed config block via ``config_lines_for_settings``.
+
+    Best-effort: if the device's pack metadata cannot be resolved (no packs installed,
+    unknown/malformed device) or exposes no config symbols, returns ``[]`` rather than
+    flagging every symbol as unknown. This never invents a constraint the toolchain would not
+    enforce — it only moves an existing ``sync-config`` failure earlier, into the editor.
+    """
+    # Nothing to check (and no reason to pay for a pack lookup) when no edition overrides
+    # any config symbol — keeps the common empty-config manifest fast and pack-independent.
+    if not any(edition.config for edition in project.editions.values()):
+        return []
+    try:
+        _, metadata = project_metadata(project)
+        symbols = pack_config_symbols(metadata)
+    except (SystemExit, Exception):
+        # Metadata resolution can raise OSError / ValueError / xml ParseError /
+        # zipfile.BadZipFile (see cmd_project_generate_header). Without symbols we cannot
+        # tell legal from illegal, so emit nothing instead of false positives.
+        return []
+    if not symbols:
+        # Metadata resolved but exposed no config symbols (e.g. the device's cfgdata was not
+        # found in the pack). Treat as "cannot validate" rather than flagging every entry as
+        # unknown — that would be a wave of false positives, not real defects.
+        return []
+    diagnostics: list[dict[str, str]] = []
+    for edition_name in sorted(project.editions):
+        edition = project.editions[edition_name]
+        for name in sorted(edition.config):
+            state = edition.config[name]
+            symbol = symbols.get(name)
+            if symbol is None:
+                diagnostics.append(
+                    {
+                        "severity": "error",
+                        "kind": "unknown_config_symbol",
+                        "edition": edition_name,
+                        "symbol": name,
+                        "message": f"unknown config symbol {name!r} for {project.device}",
+                    }
+                )
+                continue
+            if state not in symbol.options:
+                available = ", ".join(sorted(symbol.options)) or "(none)"
+                diagnostics.append(
+                    {
+                        "severity": "error",
+                        "kind": "invalid_config_value",
+                        "edition": edition_name,
+                        "symbol": name,
+                        "message": (
+                            f"invalid value {state!r} for {name} in edition "
+                            f"{edition_name!r}; expected one of: {available}"
+                        ),
+                    }
+                )
+    return diagnostics
+
+
+def manifest_header_diagnostic(project_path: Path, project) -> dict[str, str] | None:
+    """Flag a missing provided header (existing/supplied modes) against ``header.path``.
+
+    Generated mode synthesizes the header on build, so a not-yet-written generated header is
+    not "missing"; only existing/supplied modes reference a file the user must provide.
+    """
+    if project.header_mode not in {"existing", "supplied"}:
+        return None
+    try:
+        ensure_project_header(project_path, project)
+    except SystemExit as exc:
+        return {
+            "severity": "error",
+            "kind": "missing_header",
+            "field": "header.path",
+            "message": str(exc),
+        }
+    return None
+
+
+def project_manifest_diagnostics(project_path: Path, project) -> list[dict[str, str]]:
+    """Locatable manifest diagnostics for the editor: unknown config symbols, invalid config
+    values, and a missing provided header. Each entry carries enough context (``edition`` +
+    ``symbol`` or ``field``) for the extension to anchor it to the offending line in the
+    manifest. Schema/source/compiler readiness stays in the existing ``*_errors`` lists.
+    """
+    diagnostics: list[dict[str, str]] = []
+    header_diag = manifest_header_diagnostic(project_path, project)
+    if header_diag is not None:
+        diagnostics.append(header_diag)
+    diagnostics.extend(manifest_config_diagnostics(project))
+    return diagnostics
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     result = find_device_metadata(args.device, args.mplab_root)
     print(json.dumps(result, indent=2))
@@ -1304,6 +1402,12 @@ def cmd_project_validate(args: argparse.Namespace) -> int:
     schema_errors = validate_project_file(project)
     build_errors = [] if schema_errors else project_build_readiness_errors(project_path, project)
     errors = [*schema_errors, *build_errors]
+    # Locatable, structured diagnostics for the editor (unknown config symbols, invalid
+    # config values, missing provided header). Only meaningful once the manifest shape is
+    # valid, so skip when schema_errors already exist. An error-severity diagnostic that is
+    # not already in `errors` (a bad config symbol/value) still makes validation fail.
+    diagnostics = [] if schema_errors else project_manifest_diagnostics(project_path, project)
+    has_error_diag = any(item.get("severity") == "error" for item in diagnostics)
     if args.json:
         print(
             json.dumps(
@@ -1312,12 +1416,13 @@ def cmd_project_validate(args: argparse.Namespace) -> int:
                     "schema_errors": schema_errors,
                     "build_errors": build_errors,
                     "errors": errors,
+                    "diagnostics": diagnostics,
                 },
                 indent=2,
             )
         )
     else:
-        if errors:
+        if errors or has_error_diag:
             print(f"invalid: {project_path}")
             if schema_errors:
                 print("schema:")
@@ -1327,12 +1432,17 @@ def cmd_project_validate(args: argparse.Namespace) -> int:
                 print("build readiness:")
                 for error in build_errors:
                     print(f"- {error}")
+            config_diags = [d for d in diagnostics if d.get("kind") != "missing_header"]
+            if config_diags:
+                print("config:")
+                for diag in config_diags:
+                    print(f"- {diag['message']}")
         else:
             print(f"valid: {project_path}")
             print(f"device: {project.device}")
             print(f"editions: {', '.join(sorted(project.editions))}")
             print(f"header: {project.header_mode} -> {project.header_path}")
-    return 0 if not errors else 1
+    return 0 if not errors and not has_error_diag else 1
 
 
 def cmd_project_edit_edition(args: argparse.Namespace) -> int:

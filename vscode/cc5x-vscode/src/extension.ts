@@ -24,6 +24,7 @@ import {
   workspaceRoot,
 } from './helper';
 import { publishCc5xDiagnostics } from './diagnostics';
+import { clearManifestDiagnostics, publishManifestDiagnostics } from './manifestDiagnostics';
 import { ArtifactsProvider } from './artifacts';
 import { Cc5xTaskProvider } from './tasks';
 import { Cc5xConfigLensProvider } from './configLens';
@@ -46,6 +47,7 @@ interface ProgramResult {
 
 let channel: vscode.OutputChannel;
 let diagnostics: vscode.DiagnosticCollection;
+let manifestDiagnostics: vscode.DiagnosticCollection;
 let artifacts: ArtifactsProvider;
 let statusBar: vscode.StatusBarItem;
 let currentProject: ProjectInfo | undefined;
@@ -55,6 +57,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const root = workspaceRoot();
   channel = vscode.window.createOutputChannel('CC5X');
   diagnostics = vscode.languages.createDiagnosticCollection('cc5x');
+  // Separate from the build (`cc5x`) collection: build diagnostics target the C sources and
+  // are cleared on every build, whereas these target the manifest and track its validity.
+  manifestDiagnostics = vscode.languages.createDiagnosticCollection('cc5x-manifest');
   artifacts = new ArtifactsProvider();
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'cc5x.doctor';
@@ -69,6 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     channel,
     diagnostics,
+    manifestDiagnostics,
     statusBar,
     vscode.window.registerTreeDataProvider('cc5xArtifacts', artifacts),
     vscode.commands.registerCommand('cc5x.doctor', () => runDoctor(root)),
@@ -104,6 +110,9 @@ export function activate(context: vscode.ExtensionContext): void {
       // and re-evaluate the config lens (it must vanish once there is no project).
       watcher.onDidDelete(() => {
         currentProject = undefined;
+        // Bumps the validate generation too, so an in-flight validate cannot re-publish
+        // diagnostics for the just-deleted manifest.
+        clearManifestDiagnostics(manifestDiagnostics);
         configLens.refresh();
       }),
     );
@@ -156,6 +165,12 @@ async function reloadProject(root: vscode.WorkspaceFolder): Promise<void> {
   } catch (err) {
     currentProject = undefined;
     channel.appendLine(`CC5X: could not load manifest: ${String(err)}`);
+  }
+  // Re-validate the manifest into the Problems panel (unknown config symbols, illegal
+  // values, missing provided header). Only when trusted — this spawns the helper, which
+  // runs the workspace-configured interpreter.
+  if (vscode.workspace.isTrusted) {
+    await publishManifestDiagnostics(root, manifestDiagnostics);
   }
   // The config_source path may have changed; re-evaluate the Sync Config lens.
   configLens.refresh();
