@@ -19,6 +19,15 @@ export interface ProjectInfo {
   editions: Record<string, unknown>;
 }
 
+/** One discoverable device, as emitted by `list-devices --json`. */
+export interface DeviceInfo {
+  device: string;
+  pack_family: string;
+  pack_version: string;
+  pack_root: string;
+  pdsc: string | null;
+}
+
 function config(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration('cc5x');
 }
@@ -167,5 +176,28 @@ export function loadProject(root: vscode.WorkspaceFolder): Promise<ProjectInfo> 
     'project-show',
     '--project',
     manifestAbsPath(root),
+  ]);
+}
+
+/**
+ * List the locally discoverable CC5X-family devices (PIC10F/12F/16F) from installed
+ * packs, via `list-devices --json`. The helper already merges archive + installed
+ * packs keeping the highest pack version, so the result is deduplicated and sorted.
+ */
+export function listDevices(root: vscode.WorkspaceFolder): Promise<DeviceInfo[]> {
+  return runHelperJson<DeviceInfo[]>(root, ['list-devices']);
+}
+
+/** Set the manifest's target device via `project-edit --device` (validates + writes). */
+export function setProjectDevice(
+  root: vscode.WorkspaceFolder,
+  device: string,
+): Promise<HelperResult> {
+  return runHelper(root, [
+    'project-edit',
+    '--project',
+    manifestAbsPath(root),
+    '--device',
+    device,
   ]);
 }

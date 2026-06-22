@@ -1,14 +1,17 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import {
+  DeviceInfo,
   HelperResult,
   ProjectInfo,
+  listDevices,
   loadProject,
   manifestAbsPath,
   manifestWatchPattern,
   programmerTool,
   runHelper,
   runHelperJson,
+  setProjectDevice,
   workspaceRoot,
 } from './helper';
 import { publishCc5xDiagnostics } from './diagnostics';
@@ -57,6 +60,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('cc5x.build', () => runBuild(root)),
     vscode.commands.registerCommand('cc5x.program', () => runProgram(root)),
     vscode.commands.registerCommand('cc5x.generateTasks', () => generateTasks(root)),
+    vscode.commands.registerCommand('cc5x.selectDevice', () => selectDevice(root)),
     vscode.commands.registerCommand('cc5x.refreshArtifacts', () => artifacts.refresh()),
     vscode.commands.registerCommand('cc5x.openArtifact', (uri: vscode.Uri) => {
       // Binary artifacts (.hex/.cod/.cof) can't open as text; surface the error
@@ -171,6 +175,70 @@ async function pickEdition(
     return editions[0];
   }
   return vscode.window.showQuickPick(editions, { placeHolder: placeholder });
+}
+
+/**
+ * Show a QuickPick over the locally discoverable CC5X devices (`list-devices --json`)
+ * and return the chosen device name, or undefined if cancelled / none found.
+ *
+ * Exported so a future Create Project wizard can reuse the same picker. The caller is
+ * responsible for the trust/root guards; this only talks to the (read-only) helper.
+ */
+export async function pickDevice(
+  root: vscode.WorkspaceFolder,
+  placeholder = 'Select a target PIC device',
+): Promise<string | undefined> {
+  let devices: DeviceInfo[];
+  try {
+    devices = await listDevices(root);
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not list devices: ${String(err)}`);
+    return undefined;
+  }
+  if (devices.length === 0) {
+    vscode.window.showErrorMessage('CC5X: no devices found. Run Doctor to check pack discovery.');
+    return undefined;
+  }
+  const items: vscode.QuickPickItem[] = devices.map((d) => ({
+    label: d.device,
+    description: `${d.pack_family} ${d.pack_version}`,
+  }));
+  // matchOnDescription lets the user filter by family ("16F") or pack version too.
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: placeholder,
+    matchOnDescription: true,
+  });
+  return picked?.label;
+}
+
+/** Pick a device and write it to the current manifest via `project-edit --device`. */
+async function selectDevice(root: vscode.WorkspaceFolder | undefined): Promise<void> {
+  if (!ensureTrusted() || !requireRoot(root)) {
+    return;
+  }
+  const device = await pickDevice(root);
+  if (!device) {
+    return;
+  }
+  let result: HelperResult;
+  try {
+    result = await setProjectDevice(root, device);
+  } catch (err) {
+    vscode.window.showErrorMessage(`CC5X: could not set device: ${String(err)}`);
+    return;
+  }
+  if (result.code === 0) {
+    // Refresh the cached manifest so the new device is reflected immediately
+    // (the manifest watcher also fires, but this avoids a visible lag).
+    await reloadProject(root);
+    vscode.window.showInformationMessage(`CC5X: project device set to ${device}.`);
+  } else {
+    channel.show(true);
+    channel.appendLine(result.stdout + result.stderr);
+    vscode.window.showErrorMessage(
+      `CC5X: failed to set device to ${device}. See the CC5X output channel.`,
+    );
+  }
 }
 
 async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void> {

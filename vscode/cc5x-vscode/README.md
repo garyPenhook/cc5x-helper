@@ -14,6 +14,8 @@ programming.
 - **CC5X: Build** — builds a chosen edition, streams output, parses CC5X diagnostics into the
   Problems panel, and refreshes the artifact view.
 - **CC5X: Program Device** — programs a built `.hex` via IPECMD (with a confirmation prompt).
+- **CC5X: Select Device** — pick a target PIC from the locally discovered packs
+  (`list-devices --json`) and write it to the manifest (`project-edit --device`).
 - **CC5X: Generate VS Code Tasks** — writes `.vscode/tasks.json` (build + program/erase/verify).
 - **Task support** — `CC5X: Generate VS Code Tasks` writes concrete build/program/verify/erase
   tasks to `.vscode/tasks.json`; the `type: cc5x` provider only resolves hand-authored tasks.
