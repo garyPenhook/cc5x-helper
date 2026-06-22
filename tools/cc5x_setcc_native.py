@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -1286,12 +1287,45 @@ def _emit_program_payload(payload: dict[str, object], as_json: bool) -> None:
     print("command:", shlex.join([str(part) for part in payload.get("command", [])]))
 
 
-def _program_error(kind: str, message: str, as_json: bool, **details: object) -> int:
+def _json_error_payload(kind: str, message: str, **details: object) -> dict[str, object]:
+    """The standard structured error: ``{ok:false, error:{kind, message[, details]}}``."""
     payload: dict[str, object] = {"ok": False, "error": {"kind": kind, "message": message}}
     if details:
         payload["error"]["details"] = details  # type: ignore[index]
-    _emit_program_payload(payload, as_json)
+    return payload
+
+
+def _program_error(kind: str, message: str, as_json: bool, **details: object) -> int:
+    _emit_program_payload(_json_error_payload(kind, message, **details), as_json)
     return 1
+
+
+def json_error_boundary(func):
+    """Wrap a ``cmd_*`` function so the ``--json`` contract holds on failure.
+
+    In ``--json`` mode a ``SystemExit("<message>")`` or unexpected error becomes the standard
+    ``{ok:false, error:{kind, message}}`` payload on stdout (exit 1), instead of a stderr
+    message / traceback an extension JSON consumer cannot parse. A ``SystemExit`` carrying an
+    int code (argparse, or a command's own chosen exit code) passes through unchanged, and
+    non-JSON mode is never altered.
+    """
+
+    @functools.wraps(func)
+    def wrapper(args: argparse.Namespace) -> int:
+        if not getattr(args, "json", False):
+            return func(args)
+        try:
+            return func(args)
+        except SystemExit as exc:
+            if exc.code is None or isinstance(exc.code, int):
+                raise
+            print(json.dumps(_json_error_payload("command_failed", str(exc.code)), indent=2))
+            return 1
+        except Exception as exc:  # JSON boundary: never leak a traceback to a JSON consumer
+            print(json.dumps(_json_error_payload("command_failed", str(exc)), indent=2))
+            return 1
+
+    return wrapper
 
 
 def ipecmd_failure_guidance(stdout: str, stderr: str, tool: str) -> list[str]:
@@ -2057,7 +2091,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     describe.add_argument("--device", required=True)
     describe.add_argument("--mplab-root")
-    describe.set_defaults(func=cmd_describe_device)
+    # describe-device always emits JSON (metadata.to_json) but has no --json flag; set the
+    # attribute so the error boundary engages and a bad device yields {ok:false} JSON too.
+    describe.set_defaults(func=json_error_boundary(cmd_describe_device), json=True)
 
     list_devices = subparsers.add_parser(
         "list-devices",
@@ -2070,14 +2106,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restrict the output to one or more CC5X-supported families.",
     )
     list_devices.add_argument("--json", action="store_true")
-    list_devices.set_defaults(func=cmd_list_devices)
+    list_devices.set_defaults(func=json_error_boundary(cmd_list_devices))
 
     doctor = subparsers.add_parser(
         "doctor",
         help="Report whether the local packs and CrossOver-backed CC5X toolchain are usable.",
     )
     doctor.add_argument("--json", action="store_true")
-    doctor.set_defaults(func=cmd_doctor)
+    doctor.set_defaults(func=json_error_boundary(cmd_doctor))
 
     project_init = subparsers.add_parser(
         "project-init",
@@ -2105,7 +2141,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     project_validate.add_argument("--project", default="setcc-native.json")
     project_validate.add_argument("--json", action="store_true")
-    project_validate.set_defaults(func=cmd_project_validate)
+    project_validate.set_defaults(func=json_error_boundary(cmd_project_validate))
 
     project_edit = subparsers.add_parser(
         "project-edit",
@@ -2182,7 +2218,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     project_list_editions.add_argument("--project", default="setcc-native.json")
     project_list_editions.add_argument("--json", action="store_true")
-    project_list_editions.set_defaults(func=cmd_project_list_editions)
+    project_list_editions.set_defaults(func=json_error_boundary(cmd_project_list_editions))
 
     project_show = subparsers.add_parser(
         "project-show",
@@ -2191,7 +2227,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_show.add_argument("--project", default="setcc-native.json")
     project_show.add_argument("--edition")
     project_show.add_argument("--json", action="store_true")
-    project_show.set_defaults(func=cmd_project_show)
+    project_show.set_defaults(func=json_error_boundary(cmd_project_show))
 
     render_pack = subparsers.add_parser(
         "render-pack-config-section",
@@ -2216,7 +2252,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_pack_config.add_argument("--device", required=True)
     list_pack_config.add_argument("--mplab-root")
     list_pack_config.add_argument("--json", action="store_true")
-    list_pack_config.set_defaults(func=cmd_list_pack_config)
+    list_pack_config.set_defaults(func=json_error_boundary(cmd_list_pack_config))
 
     render_pack_config = subparsers.add_parser(
         "render-pack-config",

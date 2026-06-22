@@ -386,6 +386,46 @@ def _config_symbol(name: str, *states: str) -> "build.ConfigSymbol":
     return symbol
 
 
+class JsonErrorBoundaryTests(unittest.TestCase):
+    """Phase 1: every --json command emits {ok:false,error} on failure, not a traceback."""
+
+    def _wrapped(self, fn):
+        return build.json_error_boundary(fn)
+
+    def test_systemexit_message_becomes_json_error(self) -> None:
+        def boom(args):
+            raise SystemExit("kaboom")
+        args = types.SimpleNamespace(json=True)
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = self._wrapped(boom)(args)
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["message"], "kaboom")
+
+    def test_generic_exception_becomes_json_error(self) -> None:
+        def boom(args):
+            raise ValueError("bad input")
+        with unittest.mock.patch("builtins.print") as printed:
+            rc = self._wrapped(boom)(types.SimpleNamespace(json=True))
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertEqual(payload["error"]["kind"], "command_failed")
+
+    def test_int_systemexit_passes_through(self) -> None:
+        def boom(args):
+            raise SystemExit(2)  # argparse-style numeric exit
+        with self.assertRaises(SystemExit) as ctx:
+            self._wrapped(boom)(types.SimpleNamespace(json=True))
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_non_json_mode_propagates(self) -> None:
+        def boom(args):
+            raise SystemExit("text mode error")
+        with self.assertRaises(SystemExit):
+            self._wrapped(boom)(types.SimpleNamespace(json=False))
+
+
 class CollectArtifactsTests(unittest.TestCase):
     """Phase 1: `artifacts --json` enumerates CC5X build outputs (newest first)."""
 
