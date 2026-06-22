@@ -399,6 +399,48 @@ def _read_zip_member_capped(
     return data
 
 
+def _open_regular_file_rdonly(path: Path) -> int:
+    """Open ``path`` for reading, refusing anything but a regular file.
+
+    A pack root can be attacker-writable, and ``candidate.exists()`` (and any
+    name-based check) follows symlinks, so the path can resolve to a FIFO or a
+    block/character device node. Performing a normal ``open()`` on such a target is
+    itself the side effect we must avoid: a device open can block or touch hardware
+    before any type check runs, and ``O_NONBLOCK`` does not make arbitrary device
+    opens side-effect-free.
+
+    On Linux we acquire the descriptor with ``O_PATH``, which references the resolved
+    inode *without* performing an I/O open (no device interaction, no blocking). We
+    ``fstat`` that descriptor; only a regular file is then upgraded to a readable fd
+    by reopening ``/proc/self/fd/<n>``, which is bound to the already-opened inode and
+    therefore cannot be swapped for a different file (no TOCTOU re-resolution of the
+    user-supplied path). Where ``O_PATH``/procfs is unavailable, fall back to an
+    ``O_NONBLOCK`` open validated by ``fstat`` (covers the FIFO case at least).
+    """
+    o_path = getattr(os, "O_PATH", 0)
+    o_cloexec = getattr(os, "O_CLOEXEC", 0)
+    if o_path and os.path.isdir("/proc/self/fd"):
+        path_fd = os.open(path, os.O_RDONLY | o_path | o_cloexec)
+        try:
+            if not stat.S_ISREG(os.fstat(path_fd).st_mode):
+                raise ValueError(f"not a regular file: {path}")
+            # Reopen the same inode for actual reading; the magic procfs symlink
+            # resolves to what path_fd already points at, not the original path.
+            return os.open(f"/proc/self/fd/{path_fd}", os.O_RDONLY | o_cloexec)
+        finally:
+            os.close(path_fd)
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | o_cloexec
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"not a regular file: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _read_text_file_capped(
     path: Path,
     encoding: str,
@@ -406,17 +448,12 @@ def _read_text_file_capped(
 ) -> str:
     """Read a plain device file with a hard byte cap.
 
-    Opens the file first, then validates the *opened descriptor* with ``fstat`` so a
-    path swapped between check and open (TOCTOU on an attacker-writable pack root)
-    cannot substitute a FIFO or device. ``O_NONBLOCK`` makes opening a FIFO return
-    immediately instead of blocking on a writer, and the cap is applied to the read
-    so a regular file that grows after the open still cannot exhaust memory.
+    Validates that the target is a regular file *before* any I/O open of a special
+    file (see ``_open_regular_file_rdonly``), and caps the read so a regular file that
+    grows after the open still cannot exhaust memory.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(path, flags)
+    fd = _open_regular_file_rdonly(path)
     with os.fdopen(fd, "rb") as handle:  # fdopen owns fd and closes it on exit
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise ValueError(f"not a regular file: {path}")
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError(

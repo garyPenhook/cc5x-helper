@@ -49,6 +49,20 @@ def test_read_text_file_capped_rejects_fifo(tmp_path: Path) -> None:
         _read_text_file_capped(fifo, "utf-8")
 
 
+@pytest.mark.skipif(
+    not os.path.exists("/dev/zero"), reason="no character device available"
+)
+def test_read_text_file_capped_rejects_char_device(tmp_path: Path) -> None:
+    # A symlink in an attacker-writable pack root pointing at a device node must be
+    # rejected by the descriptor type check, without performing an I/O open of the
+    # device (O_PATH on Linux). /dev/zero is a world-readable char device, so a naive
+    # reader would otherwise stream zeros up to the byte cap.
+    link = tmp_path / "device.PIC"
+    os.symlink("/dev/zero", link)
+    with pytest.raises(ValueError, match="not a regular file"):
+        _read_text_file_capped(link, "utf-8")
+
+
 def test_read_text_reference_reads_plain_file(tmp_path: Path) -> None:
     src = tmp_path / "device.ini"
     src.write_text("[dev]\nARCH=PIC14E\n", encoding="utf-8")
