@@ -252,14 +252,26 @@ Inspect and edit the manifest from the CLI:
 uv run cc5x-helper project-list-editions
 uv run cc5x-helper project-show --edition production
 uv run cc5x-helper project-edit --header-mode existing --header-path include/16F1509.H
+
+# Manage an edition's config symbols and build options:
+uv run cc5x-helper project-set-config --edition production --set FOSC=INTOSC --set WDTE=OFF
+uv run cc5x-helper project-set-build-options --edition production --option -a
+uv run cc5x-helper project-edit-edition --edition release --copy-from production
 ```
 
-Add `--dry-run` to `build` to print the compiler command line without running it.
+Mutation commands reject changes the validator would refuse (e.g. an empty config
+value) without writing the manifest. Other read commands include `describe-device`,
+`list-config`, `list-pack-config`, `probe`, `intellisense`, and `artifacts` — run
+`uv run cc5x-helper --help` for the full list.
+
+Add `--dry-run` to `build` to print the compiler command line without running it,
+or `--timeout-seconds N` to abort the compiler after `N` seconds.
 
 ### Programming a device (optional)
 
 ```bash
-# Program the device's hex image via a PICkit 4 (default tool)
+# Program the device's hex image via a PICkit 4 (default tool).
+# Device-modifying actions confirm first — see "Confirmation" below.
 uv run cc5x-helper program --project setcc-native.json --edition production
 
 # Other operations and tools
@@ -269,8 +281,21 @@ uv run cc5x-helper program --action erase --device PIC16F1509 --dry-run
 
 `--action` accepts `program` / `verify` / `erase` / `blank-check`; `--tool` accepts
 IPECMD `-TP` codes (`PK4`, `PK5`, `SNAP`, `ICD4`). Use `--ipe-arg` to pass raw
-IPECMD flags (e.g. `--ipe-arg=-W2.5` to power the target) and `--dry-run` to preview
-the command.
+IPECMD flags (e.g. `--ipe-arg=-W2.5` to power the target), `--dry-run` to preview
+the command, and `--timeout-seconds N` to abort IPECMD after `N` seconds.
+
+**Confirmation for device-modifying actions.** `program` and `erase` write to the
+chip, so they require explicit authorization before running (`verify` / `blank-check`
+and any `--dry-run` are read-only and never prompt):
+
+- In an interactive terminal you are prompted to type `yes` to proceed.
+- Pass **`--yes`** to authorize without a prompt (use this in scripts).
+- In `--json` mode or a non-interactive shell there is no prompt: the command
+  returns a `confirmation_required` error unless `--yes` is given.
+
+The GUI and VS Code extension pass `--yes` automatically *after* their own
+"writes to hardware" confirmation; generated VS Code tasks omit it and prompt in
+the integrated terminal.
 
 ---
 
@@ -319,8 +344,10 @@ Then install the `.vsix` via *Extensions → … → Install from VSIX*, or run 
 extension from VS Code's Extension Development Host (`F5`).
 
 The extension activates when the workspace contains `setcc-native.json` and adds
-the commands **CC5X: Doctor / Build / Program Device / Generate VS Code Tasks /
-Refresh Artifacts**.
+the **CC5X:** commands **Doctor, Build, Program Device, Create Project, Select
+Device, Edit Config, Sync Config, Generate Header, Refresh IntelliSense, Generate
+VS Code Tasks, Refresh Artifacts, Open Artifact**. Program Device shows a modal
+"writes to hardware" confirmation before flashing.
 
 > **Workspace Trust required.** Because the extension runs the workspace-configured
 > Python interpreter, helper script, and IPECMD, it only operates in
@@ -328,7 +355,8 @@ Refresh Artifacts**.
 > In an untrusted folder the commands are disabled until you trust it.
 
 Relevant settings (`cc5x.*`): `pythonPath`, `helperPath`, `manifest`,
-`programmerTool`. You can also generate `.vscode/tasks.json` from the CLI:
+`programmerTool`, `ipecmdPath`, `commandTimeoutSeconds`. You can also generate
+`.vscode/tasks.json` from the CLI:
 
 ```bash
 uv run cc5x-helper vscode-tasks --project setcc-native.json --tool PK4
