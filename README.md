@@ -1,4 +1,38 @@
+<div align="center">
+
 # cc5x-helper
+
+**Linux-native CC5X PIC workflow** — pack-driven headers, managed `#pragma config`,
+CrossOver/Wine builds, and optional IPECMD flashing, all from one checked-in manifest.
+
+[![CI](https://github.com/garyPenhook/cc5x-helper/actions/workflows/python-package.yml/badge.svg)](https://github.com/garyPenhook/cc5x-helper/actions/workflows/python-package.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![Interfaces: CLI · GUI · VS Code](https://img.shields.io/badge/interfaces-CLI%20%C2%B7%20GUI%20%C2%B7%20VS%20Code-2496ed.svg)](#usage--cli)
+
+<img src="docs/screenshot.png" alt="cc5x-helper desktop GUI — Projects tab" width="820">
+
+</div>
+
+---
+
+## Contents
+
+- [Why This Exists](#why-this-exists)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Setup](#setup)
+- [Usage — CLI](#usage--cli)
+- [Usage — Desktop GUI](#usage--desktop-gui)
+- [Usage — VS Code extension](#usage--vs-code-extension)
+- [Manifest reference](#manifest-reference-setcc-nativejson)
+- [Packaging](#packaging--single-file-linux-executables)
+- [Testing & validation](#testing--validation)
+- [Supported scope](#supported-scope)
+- [Repository layout](#repository-layout)
+- [Limitations](#limitations)
+
+---
 
 `cc5x-helper` is a Linux-native replacement for the useful engineering workflows behind BKND's `SETCC.EXE`.
 
