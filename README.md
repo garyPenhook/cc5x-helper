@@ -504,7 +504,6 @@ Validation uses the real `CC5X.EXE` under CrossOver/Wine.
 - [vscode/cc5x-vscode](vscode/cc5x-vscode) — VS Code extension
 - [NATIVE_SETCC.md](NATIVE_SETCC.md) — operator notes and command examples
 - [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) — validated devices and current project boundaries
-- [CODEX_SETCC_IMPLEMENTATION_PLAN.md](CODEX_SETCC_IMPLEMENTATION_PLAN.md) — implementation plan and next phases
 
 ---
 
