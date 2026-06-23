@@ -11,6 +11,7 @@ Each test pins one finding so a future refactor cannot silently reopen it:
   raises ``OSError``.
 * #6 a self-contained runner (no ``{compiler}`` placeholder) must not require the
   compiler file on disk.
+* #7 generated-header projects must validate that the header can actually be rendered.
 * #8 manifest mutation commands must not persist state the validator rejects.
 * #9 pack discovery must skip one unreadable entry, not abort.
 """
@@ -225,7 +226,8 @@ class SelfContainedRunnerReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             project = self._project(tmpdir, runner="/bin/sh", compiler="/nonexistent/CC5X.EXE")
-            errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
+            with unittest.mock.patch.object(build, "render_project_generated_header", return_value="// ok\n"):
+                errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
             self.assertFalse(any("compiler not found" in e for e in errors), errors)
 
     def test_placeholder_runner_still_requires_compiler_file(self) -> None:
@@ -234,15 +236,29 @@ class SelfContainedRunnerReadinessTests(unittest.TestCase):
             project = self._project(
                 tmpdir, runner="wine {compiler}", compiler="/nonexistent/CC5X.EXE"
             )
-            errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
+            with unittest.mock.patch.object(build, "render_project_generated_header", return_value="// ok\n"):
+                errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
             self.assertTrue(any("compiler not found" in e for e in errors), errors)
 
     def test_no_runner_still_requires_compiler_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             project = self._project(tmpdir, runner=None, compiler="/nonexistent/CC5X.EXE")
-            errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
+            with unittest.mock.patch.object(build, "render_project_generated_header", return_value="// ok\n"):
+                errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
             self.assertTrue(any("compiler not found" in e for e in errors), errors)
+
+    def test_generated_header_failure_is_a_readiness_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            project = self._project(tmpdir, runner="/bin/sh", compiler="/nonexistent/CC5X.EXE")
+            with unittest.mock.patch.object(
+                build,
+                "render_project_generated_header",
+                side_effect=SystemExit("cannot generate header for PIC16F1509: unsupported architecture"),
+            ):
+                errors = project_build_readiness_errors(tmpdir / "setcc-native.json", project)
+            self.assertTrue(any("cannot generate header for PIC16F1509" in e for e in errors), errors)
 
 
 class MutationValidationTests(unittest.TestCase):

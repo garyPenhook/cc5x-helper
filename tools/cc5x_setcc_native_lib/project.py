@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .fsutil import atomic_write_text
 from .packs import normalize_device_name
 
 
@@ -198,7 +199,10 @@ def load_project_file(path: Path) -> ProjectFile:
 
 
 def write_project_file(project: ProjectFile, path: Path) -> None:
-    path.write_text(json.dumps(project.to_dict(), indent=2) + "\n", encoding="utf-8")
+    # Atomic write: the manifest holds the device, header config, and every edition, so a
+    # crash / disk-full mid-write must not truncate it. Mirrors the source/header writes
+    # rather than the old plain write_text that truncated before serializing (audit).
+    atomic_write_text(path, json.dumps(project.to_dict(), indent=2) + "\n", encoding="utf-8")
 
 
 def validate_project_file(project: ProjectFile) -> list[str]:

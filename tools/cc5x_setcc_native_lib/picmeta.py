@@ -127,7 +127,14 @@ def parse_ini_text(
         section_lines.append(stripped)
     parser = configparser.ConfigParser(strict=False, interpolation=None)
     parser.optionxform = str
-    parser.read_string("\n".join(section_lines))
+    try:
+        parser.read_string("\n".join(section_lines))
+    except configparser.Error as exc:
+        # Untrusted pack `.ini`: a malformed line makes configparser raise ParsingError,
+        # which is NOT a ValueError/OSError and would escape both the command handlers and
+        # main()'s catch as a raw traceback (breaking the --json contract). Re-raise as a
+        # ValueError so it is handled like any other bad-input error.
+        raise ValueError(f"malformed device .ini metadata: {exc}") from exc
     # An INI with no section header is malformed; treat it as having no keys rather
     # than raising IndexError on sections()[0].
     sections = parser.sections()

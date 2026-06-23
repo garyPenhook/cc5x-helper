@@ -131,7 +131,9 @@ export function activate(context: vscode.ExtensionContext): void {
       void reloadProject(root);
     }
     context.subscriptions.push(
-      vscode.workspace.onDidGrantWorkspaceTrust(() => reloadProject(root)),
+      // void the returned promise: reloadProject can reject (e.g. helper spawn fails after
+      // trust), and a rejection from an event listener becomes an unhandled rejection.
+      vscode.workspace.onDidGrantWorkspaceTrust(() => void reloadProject(root)),
     );
   }
 }
@@ -382,10 +384,28 @@ async function selectDevice(root: vscode.WorkspaceFolder | undefined): Promise<v
  * via `project-set-config` (set NAME=STATE, or remove the override to fall back to the
  * device default).
  */
+let editConfigActive = false;
+
 async function editConfig(root: vscode.WorkspaceFolder | undefined): Promise<void> {
   if (!ensureTrusted() || !requireRoot(root)) {
     return;
   }
+  // Re-entrancy guard: this command runs an unbounded await loop against the shared
+  // currentProject snapshot. A second concurrent invocation (or a Select Device that
+  // reassigns currentProject mid-loop) would validate writes against stale symbols.
+  if (editConfigActive) {
+    vscode.window.showInformationMessage('CC5X: an Edit Config session is already open.');
+    return;
+  }
+  editConfigActive = true;
+  try {
+    await editConfigInner(root);
+  } finally {
+    editConfigActive = false;
+  }
+}
+
+async function editConfigInner(root: vscode.WorkspaceFolder): Promise<void> {
   const edition = await pickEdition(root, 'Select edition to configure');
   if (!edition) {
     return;
@@ -664,6 +684,10 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
       edition,
       '--tool',
       tool,
+      // The modal "writes to hardware" confirmation above is the user authorization; pass
+      // --yes so the helper does not (and in --json mode cannot) prompt again. Generated
+      // terminal tasks deliberately omit --yes and prompt instead.
+      '--yes',
     ];
     // Honor an explicit IPECMD path; empty means let the helper auto-discover it.
     const ipecmd = ipecmdPath();

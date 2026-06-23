@@ -1125,6 +1125,13 @@ class ProjectTab(QWidget):
             self._build_lock_buttons.append(button)
         right_layout.addLayout(action_grid)
 
+        # Cancel is the only control enabled *during* a build: a hung compiler/runner would
+        # otherwise leave every action button disabled with no way out but killing the app.
+        self.cancel_button = QPushButton("Cancel Build")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_build)
+        right_layout.addWidget(self.cancel_button)
+
         self.output = OutputPane()
         right_layout.addWidget(self.output, 1)
         splitter.addWidget(right)
@@ -1426,9 +1433,34 @@ class ProjectTab(QWidget):
         write_project_file(project, self.project_path())
         self.load_project()
 
+    def _confirm_discard_unsaved_edits(self) -> bool:
+        """Ask before clobbering unsaved editor text; return True if it's safe to overwrite.
+
+        QPlainTextEdit tracks ``document().isModified()`` (set by typing, cleared by
+        ``setPlainText`` and by our save handlers). Without this guard, switching editions or
+        any reload silently discarded typed-but-unsaved Config / Build Options edits.
+        """
+        dirty = (
+            self.config_edit.document().isModified()
+            or self.build_options_edit.document().isModified()
+        )
+        if not dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Discard unsaved edits?",
+            "The Edition Config / Build Options editors have unsaved changes that will be "
+            "discarded. Discard them?",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return reply == QMessageBox.StandardButton.Discard
+
     @gui_action
     def load_selected_edition(self, name: str) -> None:
         if not name:
+            return
+        if not self._confirm_discard_unsaved_edits():
             return
         project = load_project_file(self.require_project_path())
         edition = project.editions[name]
@@ -1443,6 +1475,7 @@ class ProjectTab(QWidget):
         updates = parse_multiline_pairs(self.config_edit.toPlainText())
         project = update_project_edition_config(project, self.current_edition(), updates, clear=True)
         write_project_file(project, self.project_path())
+        self.config_edit.document().setModified(False)  # saved -> no longer "unsaved"
         self.output.write_text(f"updated config for {self.current_edition()}")
 
     @gui_action
@@ -1452,6 +1485,7 @@ class ProjectTab(QWidget):
         project = remove_project_edition_config(project, self.current_edition(), names)
         write_project_file(project, self.project_path())
         self.config_edit.clear()
+        self.config_edit.document().setModified(False)
         self.output.write_text(f"cleared config for {self.current_edition()}")
 
     @gui_action
@@ -1460,6 +1494,7 @@ class ProjectTab(QWidget):
         options = parse_multiline_options(self.build_options_edit.toPlainText())
         project = update_project_edition_build_options(project, self.current_edition(), options)
         write_project_file(project, self.project_path())
+        self.build_options_edit.document().setModified(False)  # saved -> no longer "unsaved"
         self.output.write_text(f"updated build options for {self.current_edition()}")
 
     @gui_action
@@ -1595,6 +1630,24 @@ class ProjectTab(QWidget):
     def _set_build_running(self, running: bool) -> None:
         for button in self._build_lock_buttons:
             button.setEnabled(not running)
+        # Cancel is the inverse: only usable while a build is in flight.
+        self.cancel_button.setEnabled(running)
+
+    @gui_action
+    def cancel_build(self) -> None:
+        proc = self.process
+        if proc is None or proc.state() == QProcess.ProcessState.NotRunning:
+            return
+        self.output.append_text("\ncancelling build...\n")
+        # kill() makes the process emit finished(), so _on_build_finished re-enables controls.
+        proc.kill()
+
+    def shutdown(self) -> None:
+        """Kill an in-flight build so closing the window cannot orphan the child process."""
+        proc = self.process
+        if proc is not None and proc.state() != QProcess.ProcessState.NotRunning:
+            proc.kill()
+            proc.waitForFinished(2000)
 
     def _on_build_error(self, error: QProcess.ProcessError, proc: QProcess) -> None:
         # Only the start failure leaves no finished() signal; everything else either
@@ -1658,7 +1711,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(EnvironmentTab(self.show_help_section), "Environment")
         self.tabs.addTab(DeviceTab(self.show_help_section), "Devices")
-        self.tabs.addTab(ProjectTab(self.show_help_section), "Projects")
+        self.project_tab = ProjectTab(self.show_help_section)
+        self.tabs.addTab(self.project_tab, "Projects")
         self.tabs.addTab(self.help_tab, "Help")
         self.setCentralWidget(self.tabs)
 
@@ -1677,6 +1731,12 @@ class MainWindow(QMainWindow):
         help_menu = menu_bar.addMenu("Help")
         help_menu.addAction(help_action)
         help_menu.addAction(current_help_action)
+
+    def closeEvent(self, event) -> None:
+        # Kill an in-flight build before teardown so QProcess is not "destroyed while running"
+        # and the compiler/runner child is not orphaned when the user quits mid-build.
+        self.project_tab.shutdown()
+        super().closeEvent(event)
 
     def show_help(self) -> None:
         self.show_help_section("Welcome")

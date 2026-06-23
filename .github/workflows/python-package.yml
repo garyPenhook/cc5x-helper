@@ -75,3 +75,28 @@ jobs:
       run: npm run compile
     - name: Package VSIX
       run: npx --yes @vscode/vsce package --no-dependencies -o cc5x-vscode.vsix
+
+  locked:
+    # Install strictly from the committed uv.lock so a drifting transitive dependency cannot
+    # silently change what is tested. Additive to the pip matrix above: the matrix proves the
+    # package installs from pyproject across Python versions; this proves the pinned set is
+    # consistent and tests pass against it.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+    - name: Install headless Qt runtime libraries
+      run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+    - name: Sync from lockfile (frozen)
+      run: |
+        # --frozen fails if uv.lock is out of date with pyproject.toml, catching drift.
+        uv sync --frozen --extra dev
+        # GUI extra is best-effort (PyQt6 wheels may lag on the newest Python).
+        uv sync --frozen --extra dev --extra gui || echo "PyQt6 unavailable; GUI tests will skip"
+    - name: Test with pytest
+      env:
+        QT_QPA_PLATFORM: offscreen
+      run: uv run --frozen python -m pytest

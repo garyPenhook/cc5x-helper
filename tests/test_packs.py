@@ -407,6 +407,16 @@ class UnpackedPackDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["pack_version"], "1.10.1")
 
+    def test_equal_versions_preserve_first_root_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            root_a = Path(a)
+            root_b = Path(b)
+            self._make_pack(root_a, "PIC12-16F1xxx_DFP", "1.8.254", ["PIC16F1509"])
+            self._make_pack(root_b, "PIC12-16F1xxx_DFP", "1.8.254", ["PIC16F1509"])
+            result = list_devices_in_unpacked_packs([root_a, root_b])
+        self.assertEqual(len(result), 1)
+        self.assertTrue(str(result[0]["pack_root"]).startswith(str(root_a)))
+
     def test_finds_ini_in_unpacked_pack(self) -> None:
         # Audit #7: the .ini (ARCH/SFR/RAM) must be discovered for a pack-cache-only install,
         # not only via the slower MPLAB-install fallback.

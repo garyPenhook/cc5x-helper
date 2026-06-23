@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import types
 import unittest
@@ -218,6 +219,25 @@ class ProjectBuildReadinessTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         payload = json.loads("".join(str(call.args[0]) for call in printed.call_args_list))
         self.assertTrue(any("main_source not found" in item for item in payload["build_errors"]))
+
+    def test_project_validate_reports_generated_header_failure(self) -> None:
+        self._write_manifest()
+        (self.dir / "app.c").write_text("void main(void){}\n", encoding="ascii")
+        with unittest.mock.patch.object(
+            build,
+            "render_project_generated_header",
+            side_effect=SystemExit("cannot generate header for PIC16F1509: unsupported architecture (none)"),
+        ):
+            with unittest.mock.patch("builtins.print") as printed:
+                rc = build.cmd_project_validate(
+                    types.SimpleNamespace(project=str(self.manifest), json=True)
+                )
+        self.assertEqual(rc, 1)
+        payload = json.loads("".join(str(call.args[0]) for call in printed.call_args_list))
+        self.assertTrue(
+            any("cannot generate header for PIC16F1509" in item for item in payload["build_errors"])
+        )
+        self.assertFalse((self.dir / "gen" / "16F1509.H").exists())
 
     def test_project_build_refuses_missing_main_source_before_subprocess(self) -> None:
         self._write_manifest()
@@ -566,6 +586,28 @@ class Cc5xDiagnosticsParseTests(unittest.TestCase):
         self.assertEqual(payload["returncode"], 1)
         self.assertEqual(payload["diagnostics"][0]["message"], "oops")
 
+    def test_run_json_payload_reports_timeout(self) -> None:
+        args = types.SimpleNamespace(
+            project=None, edition=None, compiler="/c/CC5X.EXE", main="main.c",
+            option=None, runner=None, cwd=None, dry_run=False, json_diagnostics=True,
+            timeout_seconds=1,
+        )
+        timeout = subprocess.TimeoutExpired(
+            cmd=["/c/CC5X.EXE"],
+            timeout=1,
+            output="Error main.c 9: timed out late\n",
+            stderr="",
+        )
+        with unittest.mock.patch.object(build.subprocess, "run", side_effect=timeout), \
+             unittest.mock.patch("builtins.print") as printed:
+            rc = build.cmd_build(args)
+        self.assertEqual(rc, 124)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], None)
+        self.assertEqual(payload["error"]["kind"], "timeout")
+        self.assertEqual(payload["diagnostics"][0]["message"], "timed out late")
+
 
 class BuildJsonDiagnosticsErrorTests(unittest.TestCase):
     """--json-diagnostics must keep its JSON contract even when the build can't launch."""
@@ -845,6 +887,7 @@ class ProjectManifestDiagnosticsTests(unittest.TestCase):
         self._write_manifest(mode="generated", header_path="gen/16F1509.H", config={"BOREN": "MAYBE"})
         symbols = {"BOREN": _config_symbol("BOREN", "ON", "OFF")}
         with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "render_full_header", return_value="// ok\n"), \
                 unittest.mock.patch.object(build, "pack_config_symbols", return_value=symbols):
             rc, payload = self._validate()
         self.assertEqual(rc, 1)
@@ -855,7 +898,9 @@ class ProjectManifestDiagnosticsTests(unittest.TestCase):
 
     def test_valid_manifest_has_empty_diagnostics(self) -> None:
         self._write_manifest(mode="generated", header_path="gen/16F1509.H", config={})
-        rc, payload = self._validate()
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+                unittest.mock.patch.object(build, "render_full_header", return_value="// ok\n"):
+            rc, payload = self._validate()
         self.assertEqual(rc, 0)
         self.assertEqual(payload["diagnostics"], [])
 
@@ -997,6 +1042,8 @@ class ProgramJsonCaptureTests(unittest.TestCase):
             ipe_arg=None,
             dry_run=False,
             json=True,
+            timeout_seconds=0,
+            yes=True,
         )
         # program needs an image that exists; point at a real temp file.
         with tempfile.TemporaryDirectory() as tmp:
@@ -1014,6 +1061,32 @@ class ProgramJsonCaptureTests(unittest.TestCase):
         payload = json.loads(printed_text)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["stdout"], "flash ok\n")
+
+    def test_json_payload_reports_timeout(self) -> None:
+        args = types.SimpleNamespace(
+            action="program", project=None, edition=None, device="PIC16F1509", hex=None,
+            tool="PK4", ipecmd="/fake/ipecmd.sh", release_from_reset=False, ipe_arg=None,
+            dry_run=False, json=True, timeout_seconds=2, yes=True,
+        )
+        timeout = subprocess.TimeoutExpired(
+            cmd=["/fake/ipecmd.sh"],
+            timeout=2,
+            output="programming...\n",
+            stderr="still waiting\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            hexfile = Path(tmp) / "app.hex"
+            hexfile.write_text(":00000001FF\n", encoding="ascii")
+            args.hex = str(hexfile)
+            with unittest.mock.patch.object(build.subprocess, "run", side_effect=timeout), \
+                 unittest.mock.patch("builtins.print") as printed:
+                rc = build.cmd_program(args)
+        self.assertEqual(rc, 124)
+        payload = json.loads("".join(str(c.args[0]) for c in printed.call_args_list if c.args))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], None)
+        self.assertEqual(payload["error"]["kind"], "timeout")
+        self.assertEqual(payload["stdout"], "programming...\n")
 
 
 class IpecmdFailureGuidanceTests(unittest.TestCase):
@@ -1048,7 +1121,7 @@ class ProgramFailureGuidanceTests(unittest.TestCase):
         args = types.SimpleNamespace(
             action="program", project=None, edition=None, device="PIC16F1509", hex=None,
             tool="PK4", ipecmd="/fake/ipecmd.sh", release_from_reset=False, ipe_arg=None,
-            dry_run=False, json=True,
+            dry_run=False, json=True, yes=True,
         )
         with tempfile.TemporaryDirectory() as tmp:
             hexfile = Path(tmp) / "app.hex"
@@ -1189,14 +1262,46 @@ class ValidateGeneratedHeadersTests(unittest.TestCase):
             fake = types.SimpleNamespace(returncode=0, stdout="", stderr="")
             with unittest.mock.patch.object(validate_headers.subprocess, "run", return_value=fake):
                 result = validate_headers.run_compile(
-                    runner=Path("runner"),
+                    runner=["runner"],
                     include_dir=root,
                     source_path=source,
                     header_path=header,
                     label="generated",
                     device="PIC16F1509",
+                    timeout=None,
                 )
         self.assertEqual(result.header_path, str(header))
+
+    def test_compile_timeout_reports_failed_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "16f1509_gen.c"
+            header = root / "16F1509.H"
+            source.write_text('#include "16F1509.H"\nvoid main(void) {}\n', encoding="ascii")
+            header.write_text("#pragma chip PIC16F1509\n", encoding="latin-1")
+            timeout = subprocess.TimeoutExpired(
+                cmd=["runner"],
+                timeout=1,
+                output="compiling\n",
+                stderr="",
+            )
+            with unittest.mock.patch.object(validate_headers.subprocess, "run", side_effect=timeout):
+                result = validate_headers.run_compile(
+                    runner=["runner"],
+                    include_dir=root,
+                    source_path=source,
+                    header_path=header,
+                    label="generated",
+                    device="PIC16F1509",
+                    timeout=1,
+                )
+        self.assertEqual(result.returncode, 124)
+        self.assertFalse(result.succeeded)
+        self.assertIn("timed out", result.stderr)
+
+    def test_runner_command_expands_compiler_placeholder(self) -> None:
+        command = validate_headers.runner_command('wine "{compiler}"')
+        self.assertEqual(command, ["wine", str(validate_headers.DEFAULT_COMPILER)])
 
 
 class InstallRootDefaultsTests(unittest.TestCase):

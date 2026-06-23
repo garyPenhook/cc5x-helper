@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from cc5x_setcc_native import atomic_write_text, find_device_metadata
+from cc5x_setcc_native import (
+    DEFAULT_COMPILER,
+    DEFAULT_RUNNER,
+    atomic_write_text,
+    find_device_metadata,
+)
 from cc5x_setcc_native_lib.headergen import render_full_header
 from cc5x_setcc_native_lib.picmeta import load_device_metadata
 
@@ -26,7 +33,7 @@ DEFAULT_DEVICES = [
     "PIC16F18857",
     "PIC16F19195",
 ]
-DEFAULT_RUNNER = Path("/home/gary/apps/cc5x-run.sh")
+DEFAULT_VALIDATION_TIMEOUT_SECONDS = 300.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_HEADER_ROOT = PROJECT_ROOT / "cc5x_paid" / "CC5X"
 VALIDATION_ROOT = PROJECT_ROOT / "validation" / "generated"
@@ -64,6 +71,29 @@ def write_validation_source(source_path: Path, header_name: str) -> None:
     )
 
 
+def default_runner_spec() -> str:
+    return os.environ.get("CC5X_RUNNER") or str(DEFAULT_RUNNER)
+
+
+def runner_command(runner_spec: str) -> list[str]:
+    parts = shlex.split(runner_spec)
+    if not parts:
+        raise SystemExit("--runner must not be empty")
+    return [part.replace("{compiler}", str(DEFAULT_COMPILER)) for part in parts]
+
+
+def timeout_seconds(value: float) -> float | None:
+    return value if value > 0 else None
+
+
+def timeout_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
 def occ_summary(occ_path: Path) -> str | None:
     if not occ_path.exists():
         return None
@@ -74,36 +104,49 @@ def occ_summary(occ_path: Path) -> str | None:
 
 
 def run_compile(
-    runner: Path,
+    runner: list[str],
     include_dir: Path,
     source_path: Path,
     header_path: Path,
     label: str,
     device: str,
+    timeout: float | None,
 ) -> CompileResult:
     windows_include = to_windows_path(include_dir)
     windows_source = to_windows_path(source_path)
-    completed = subprocess.run(
-        [str(runner), "-S", f"-I{windows_include}", windows_source],
-        cwd=source_path.parent,
-        text=True,
-        capture_output=True,
-    )
     stem = source_path.with_suffix("")
     occ_path = stem.with_suffix(".occ")
     hex_path = stem.with_suffix(".hex")
+    try:
+        completed = subprocess.run(
+            [*runner, "-S", f"-I{windows_include}", windows_source],
+            cwd=source_path.parent,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        returncode = completed.returncode
+        stdout = completed.stdout
+        stderr = completed.stderr
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        stdout = timeout_output(exc.stdout)
+        stderr = (
+            timeout_output(exc.stderr)
+            + f"\ncompile timed out after {exc.timeout:g} seconds"
+        ).lstrip()
     return CompileResult(
         label=label,
         device=device,
         source_path=str(source_path),
         header_path=str(header_path),
-        returncode=completed.returncode,
-        succeeded=completed.returncode == 0 and hex_path.exists(),
+        returncode=returncode,
+        succeeded=returncode == 0 and hex_path.exists(),
         hex_exists=hex_path.exists(),
         occ_exists=occ_path.exists(),
         occ_summary=occ_summary(occ_path),
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -118,7 +161,7 @@ def generate_device_header(device: str) -> str:
     return render_full_header(metadata)
 
 
-def validate_device(device: str, runner: Path) -> list[CompileResult]:
+def validate_device(device: str, runner: list[str], timeout: float | None) -> list[CompileResult]:
     short_name = short_device_name(device)
     device_dir = VALIDATION_ROOT / short_name
     generated_dir = device_dir / "generated"
@@ -141,6 +184,7 @@ def validate_device(device: str, runner: Path) -> list[CompileResult]:
         header_path=generated_header_path,
         label="generated",
         device=device,
+        timeout=timeout,
     )
 
     results = [generated_result]
@@ -156,6 +200,7 @@ def validate_device(device: str, runner: Path) -> list[CompileResult]:
                 header_path=shipped_header_path,
                 label="shipped",
                 device=device,
+                timeout=timeout,
             )
         )
     return results
@@ -166,18 +211,28 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compile generated CC5X headers under CrossOver to validate real compiler acceptance."
     )
     parser.add_argument("--device", action="append", dest="devices")
-    parser.add_argument("--runner", default=str(DEFAULT_RUNNER))
+    parser.add_argument("--runner", default=default_runner_spec())
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=DEFAULT_VALIDATION_TIMEOUT_SECONDS,
+        help=(
+            "Abort each compiler invocation after this many seconds "
+            "(0 disables; default: 300)."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    runner = Path(args.runner)
+    runner = runner_command(args.runner)
+    compile_timeout = timeout_seconds(args.timeout_seconds)
     devices = args.devices or DEFAULT_DEVICES
     results: list[CompileResult] = []
     for device in devices:
-        results.extend(validate_device(device, runner))
+        results.extend(validate_device(device, runner, compile_timeout))
     if args.json:
         print(json.dumps([asdict(item) for item in results], indent=2))
     else:

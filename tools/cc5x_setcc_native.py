@@ -10,7 +10,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -38,6 +37,7 @@ try:
         DEFAULT_CC5X_VERSION,
         build_intellisense,
     )
+    from cc5x_setcc_native_lib.fsutil import atomic_write_text
     from cc5x_setcc_native_lib.project import (
         delete_project_edition,
         default_project_manifest,
@@ -52,6 +52,7 @@ try:
         write_project_file,
     )
 except ModuleNotFoundError:
+    from tools.cc5x_setcc_native_lib.fsutil import atomic_write_text
     from tools.cc5x_setcc_native_lib.headergen import (
         render_dynamic_config_section,
         render_full_header,
@@ -218,7 +219,10 @@ def pack_config_symbols(metadata) -> dict[str, ConfigSymbol]:
         for setting in word.settings:
             symbol = symbols.setdefault(setting.name, ConfigSymbol(name=setting.name))
             for value in setting.values:
-                resolved_word = (word.default & ~setting.mask) | value.value
+                # Mask the pack-supplied value to its setting's bits before OR-ing it in, so a
+                # malformed CVALUE with stray high bits can't bleed into neighbouring settings
+                # of the same word. Matches headergen._render_config_line (audit consistency).
+                resolved_word = (word.default & ~setting.mask) | (value.value & setting.mask)
                 symbol.add(
                     ConfigOption(
                         register=register,
@@ -278,35 +282,6 @@ def _safe_block_comment(text: str) -> str:
 # generated ``#pragma config`` block. Validate against this charset and reject anything else
 # rather than silently coercing it (a coerced fuse name would set the wrong bits).
 _CONFIG_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]+$")
-
-
-def atomic_write_text(path: Path, text: str, encoding: str = "latin-1") -> None:
-    """Write ``text`` to ``path`` atomically, never leaving a truncated/partial file.
-
-    Encodes up front so an encoding error is raised *before* the destination is touched,
-    then writes a sibling temp file and ``os.replace``s it into place (atomic on the same
-    filesystem). A crash or error mid-write leaves the original file intact — the previous
-    ``write_text`` opened the real file for truncation first, so any failure zeroed it.
-    """
-    data = text.encode(encoding)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        # mkstemp creates the temp at 0600; preserve the original file's permission bits so a
-        # synced source file does not silently lose its group/other access (the previous
-        # in-place write kept them).
-        try:
-            os.chmod(tmp_name, os.stat(path).st_mode)
-        except OSError:
-            pass  # path did not exist (first write) or stat/chmod unsupported — leave default
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
 
 
 def config_lines_for_settings(
@@ -683,6 +658,10 @@ IPECMD_ACTION_FLAG = {
     "blank-check": "-C",
 }
 IPECMD_ACTIONS_NEEDING_IMAGE = ("program", "verify")
+# Actions that modify the connected device. These require explicit confirmation before
+# running (audit): the interactive GUI/extension pass --yes after their own modal warning,
+# while a generated terminal task (which has no modal) must prompt the user to type 'yes'.
+DESTRUCTIVE_PROGRAM_ACTIONS = ("program", "erase")
 
 
 def discover_ipecmd() -> Path | None:
@@ -945,14 +924,8 @@ def ensure_project_header(project_path: Path, project) -> Path:
         return resolve_supplied_header(project_path, project)
     header_path = project_path_join(project_path, project.header_path)
     if project.header_mode == "generated":
-        _, metadata = project_metadata(project)
+        rendered = render_project_generated_header(project)
         header_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            rendered = render_full_header(metadata)
-        except ValueError as exc:
-            # headergen rejects malformed pack metadata (e.g. an unsupported architecture);
-            # surface it as a build-stopping error rather than a traceback (audit #6).
-            raise SystemExit(f"cannot generate header for {project.device}: {exc}")
         # Write atomically: a non-latin-1 byte (or any error) must not truncate an existing
         # header to zero. atomic_write_text encodes before touching the destination, so a bad
         # pack description fails the write whole rather than leaving a clobbered file.
@@ -961,6 +934,17 @@ def ensure_project_header(project_path: Path, project) -> Path:
     if header_path.exists():
         return header_path
     raise SystemExit(f"existing header not found: {header_path}")
+
+
+def render_project_generated_header(project) -> str:
+    """Render a generated-mode project header without writing it to disk."""
+    _, metadata = project_metadata(project)
+    try:
+        return render_full_header(metadata)
+    except ValueError as exc:
+        # headergen rejects malformed pack metadata (e.g. an unsupported architecture);
+        # surface it as a build-stopping error rather than a traceback (audit #6).
+        raise SystemExit(f"cannot generate header for {project.device}: {exc}") from None
 
 
 def project_build_readiness_errors(project_path: Path, project) -> list[str]:
@@ -992,7 +976,17 @@ def project_build_readiness_errors(project_path: Path, project) -> list[str]:
         if runner_path.is_absolute() and not runner_path.exists():
             errors.append(f"runner not found: {runner_path}")
 
-    if project.header_mode in {"existing", "supplied"}:
+    if project.header_mode == "generated":
+        try:
+            render_project_generated_header(project)
+        except SystemExit as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            # Pack metadata can fail before headergen gets a chance to normalize the error
+            # (missing/corrupt XML, capped reads, bad archives). Validation should report a
+            # build-readiness problem just like the later build would, not leak a traceback.
+            errors.append(f"cannot generate header for {project.device}: {exc}")
+    elif project.header_mode in {"existing", "supplied"}:
         try:
             ensure_project_header(project_path, project)
         except SystemExit as exc:
@@ -1307,6 +1301,23 @@ def parse_cc5x_diagnostics(text: str) -> list[dict[str, object]]:
     return diagnostics
 
 
+def _timeout_seconds(args: argparse.Namespace) -> float | None:
+    timeout = getattr(args, "timeout_seconds", 0) or 0
+    return float(timeout) if timeout > 0 else None
+
+
+def _format_seconds(seconds: float) -> str:
+    return f"{seconds:g}"
+
+
+def _timeout_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
 def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace) -> int:
     """Run (or dry-run) a build command, emitting text or structured-diagnostics JSON.
 
@@ -1324,7 +1335,13 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
         return 0
     if json_mode:
         try:
-            completed = subprocess.run(command, cwd=run_cwd, capture_output=True, text=True)
+            completed = subprocess.run(
+                command,
+                cwd=run_cwd,
+                capture_output=True,
+                text=True,
+                timeout=_timeout_seconds(args),
+            )
         except OSError as exc:
             # --json-diagnostics promises parseable JSON on stdout; a launch failure
             # (compiler missing/not executable) must stay JSON, not crash with a traceback
@@ -1344,6 +1361,29 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
                 )
             )
             return 1
+        except subprocess.TimeoutExpired as exc:
+            stdout = _timeout_output(exc.stdout)
+            stderr = _timeout_output(exc.stderr)
+            timeout = _timeout_seconds(args) or float(exc.timeout)
+            combined = f"{stdout}\n{stderr}"
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "returncode": None,
+                        "command": command,
+                        "diagnostics": parse_cc5x_diagnostics(combined),
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "error": {
+                            "kind": "timeout",
+                            "message": f"build timed out after {_format_seconds(timeout)} seconds",
+                        },
+                    },
+                    indent=2,
+                )
+            )
+            return 124
         combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
         payload = {
             "ok": completed.returncode == 0,
@@ -1356,7 +1396,13 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
         print(json.dumps(payload, indent=2))
         return completed.returncode
     print("command:", shlex.join(command))
-    completed = subprocess.run(command, cwd=run_cwd)
+    try:
+        completed = subprocess.run(command, cwd=run_cwd, timeout=_timeout_seconds(args))
+    except subprocess.TimeoutExpired as exc:
+        timeout = _timeout_seconds(args) or float(exc.timeout)
+        raise SystemExit(
+            f"build timed out after {_format_seconds(timeout)} seconds: {shlex.join(command)}"
+        ) from None
     return completed.returncode
 
 
@@ -1404,15 +1450,19 @@ def cmd_build(args: argparse.Namespace) -> int:
             command, run_cwd = _prepare_project_build(args)
         else:
             command, run_cwd = _prepare_standalone_build(args)
-    except SystemExit as exc:
+    except (SystemExit, ValueError, OSError) as exc:
         # --json-diagnostics promises parseable JSON on stdout; honor the contract for
-        # launch failures (not-ready project, missing/mismatched header, bad cwd) too,
-        # mirroring `program --json` rather than dumping a bare message to stderr.
+        # launch failures (not-ready project, missing/mismatched header, bad cwd) AND for
+        # bad-input errors raised while resolving the build — a malformed manifest
+        # (ValueError/OSError) or unparseable pack .ini (configparser.Error, normalized to
+        # ValueError in picmeta) must not escape as a traceback with empty stdout.
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(
                 {"ok": False, "error": {"kind": "build_not_ready", "message": str(exc)}}, indent=2
             ))
             return 1
+        # A non-SystemExit here would otherwise traceback in text mode too; main() converts
+        # ValueError/OSError to a clean message, so only re-raise (SystemExit passes through).
         raise
     return _finish_build(command, run_cwd, args)
 
@@ -1593,6 +1643,30 @@ def ipecmd_failure_guidance(stdout: str, stderr: str, tool: str) -> list[str]:
     return hints
 
 
+def _confirm_destructive_action(action: str, device: str, args: argparse.Namespace) -> bool:
+    """Return whether a device-modifying action is authorized to run.
+
+    ``--yes`` authorizes unconditionally (the GUI/extension pass it after their own modal
+    "writes to hardware" warning). Otherwise, only an interactive TTY is offered a typed
+    confirmation — a generated VS Code task running in the integrated terminal hits this and
+    must type 'yes', so it can no longer flash/erase silently. A machine consumer (``--json``)
+    or non-TTY is never prompted; it must pass ``--yes`` explicitly.
+    """
+    if getattr(args, "yes", False):
+        return True
+    if getattr(args, "json", False) or not (sys.stdin and sys.stdin.isatty()):
+        return False
+    prompt = (
+        f"{action!r} will modify {normalize_device_name(device)} via {args.tool}. "
+        "Type 'yes' to proceed: "
+    )
+    try:
+        reply = input(prompt)
+    except EOFError:
+        return False
+    return reply.strip().lower() == "yes"
+
+
 def cmd_program(args: argparse.Namespace) -> int:
     """Drive MPLAB IPECMD to program/erase/verify/blank-check a device.
 
@@ -1655,23 +1729,55 @@ def cmd_program(args: argparse.Namespace) -> int:
         _emit_program_payload(payload, args.json)
         return 0
 
+    # Gate device-modifying actions behind confirmation so a generated task (or any caller)
+    # cannot flash/erase silently. Checked after the dry-run preview so --dry-run stays free.
+    if action in DESTRUCTIVE_PROGRAM_ACTIONS and not _confirm_destructive_action(
+        action, device, args
+    ):
+        return _program_error(
+            "confirmation_required",
+            f"action {action!r} modifies the device; pass --yes (or type 'yes' when prompted)",
+            args.json,
+        )
+
     # In --json mode the only thing on stdout must be the JSON object, so the extension
     # (and any other machine consumer) can parse it. IPECMD writes its own progress to
     # stdout/stderr, which would otherwise corrupt the payload (audit A2) — capture it
     # and fold it into the JSON. In human mode, let IPECMD stream through as before.
     try:
         if args.json:
-            completed = subprocess.run(command, capture_output=True, text=True)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=_timeout_seconds(args),
+            )
             payload["stdout"] = completed.stdout
             payload["stderr"] = completed.stderr
         else:
-            completed = subprocess.run(command)
+            completed = subprocess.run(command, timeout=_timeout_seconds(args))
     except OSError as exc:
         # IPECMD missing/not executable: keep the --json contract (structured error on
         # stdout) instead of a traceback with empty stdout (audit #4).
         return _program_error(
             "launch_failed", f"could not launch IPECMD: {exc}", args.json, ipecmd=str(ipecmd)
         )
+    except subprocess.TimeoutExpired as exc:
+        timeout = _timeout_seconds(args) or float(exc.timeout)
+        payload["ok"] = False
+        payload["returncode"] = None
+        if args.json:
+            payload["stdout"] = _timeout_output(exc.stdout)
+            payload["stderr"] = _timeout_output(exc.stderr)
+        payload["error"] = {
+            "kind": "timeout",
+            "message": (
+                f"IPECMD action {action!r} timed out after "
+                f"{_format_seconds(timeout)} seconds"
+            ),
+        }
+        _emit_program_payload(payload, args.json)
+        return 124
     payload["ok"] = completed.returncode == 0
     payload["returncode"] = completed.returncode
     if completed.returncode != 0:
@@ -2465,7 +2571,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     project_generate_header.add_argument("--project", default="setcc-native.json")
     project_generate_header.add_argument("--json", action="store_true")
-    project_generate_header.set_defaults(func=cmd_project_generate_header)
+    # json_error_boundary: a missing/malformed manifest or bad pack metadata is loaded before
+    # the command's own try/except, so wrap it to keep the --json contract (audit JSON-contract).
+    project_generate_header.set_defaults(func=json_error_boundary(cmd_project_generate_header))
 
     intellisense = subparsers.add_parser(
         "intellisense",
@@ -2480,7 +2588,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Integer __CC5X__ value to define for the editor (default {DEFAULT_CC5X_VERSION} == v3.8C).",
     )
     intellisense.add_argument("--json", action="store_true")
-    intellisense.set_defaults(func=cmd_intellisense)
+    intellisense.set_defaults(func=json_error_boundary(cmd_intellisense))
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",
@@ -2581,6 +2689,12 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--cwd")
     build.add_argument("--dry-run", action="store_true")
     build.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=0,
+        help="Abort the compiler process after this many seconds (0 disables; default).",
+    )
+    build.add_argument(
         "--json-diagnostics",
         action="store_true",
         help="Emit a JSON payload with CC5X output normalized to structured diagnostics.",
@@ -2629,8 +2743,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra raw IPECMD argument (repeatable), e.g. --ipe-arg=-W2.5 to power the target.",
     )
     program.add_argument("--dry-run", action="store_true", help="Print the command without running it.")
+    program.add_argument(
+        "--yes",
+        action="store_true",
+        help="Authorize device-modifying actions (program/erase) without an interactive prompt. "
+        "The GUI/extension pass this after their own confirmation; omit it for terminal tasks.",
+    )
+    program.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=0,
+        help="Abort IPECMD after this many seconds (0 disables; default).",
+    )
     program.add_argument("--json", action="store_true")
-    program.set_defaults(func=cmd_program)
+    # json_error_boundary catches a pre-handler manifest load error (missing/bad --project)
+    # before cmd_program's internal _program_error handling can run, keeping --json parseable.
+    program.set_defaults(func=json_error_boundary(cmd_program))
 
     vscode_tasks = subparsers.add_parser(
         "vscode-tasks",

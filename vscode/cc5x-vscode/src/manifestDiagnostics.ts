@@ -20,6 +20,9 @@ interface ManifestDiagnostic {
 }
 
 interface ValidateResult {
+  schema_errors?: string[];
+  build_errors?: string[];
+  errors?: string[];
   diagnostics?: ManifestDiagnostic[];
 }
 
@@ -59,7 +62,7 @@ export async function publishManifestDiagnostics(
     return;
   }
 
-  const diags = result.diagnostics ?? [];
+  const diags = collectValidateDiagnostics(result);
   if (diags.length === 0) {
     collection.delete(uri);
     return;
@@ -75,6 +78,26 @@ export async function publishManifestDiagnostics(
     uri,
     diags.map((d) => toDiagnostic(d, text)),
   );
+}
+
+function collectValidateDiagnostics(result: ValidateResult): ManifestDiagnostic[] {
+  const diagnostics = [...(result.diagnostics ?? [])];
+  const seenMessages = new Set(diagnostics.map((d) => d.message));
+  const addMessages = (kind: string, messages: string[] | undefined): void => {
+    for (const message of messages ?? []) {
+      if (seenMessages.has(message)) {
+        continue;
+      }
+      seenMessages.add(message);
+      diagnostics.push({ severity: 'error', kind, message });
+    }
+  };
+  // These helper fields are not locatable today, so they intentionally anchor to the file
+  // head instead of being dropped from the Problems panel.
+  addMessages('schema_error', result.schema_errors);
+  addMessages('build_error', result.build_errors);
+  addMessages('validation_error', result.errors);
+  return diagnostics;
 }
 
 /**

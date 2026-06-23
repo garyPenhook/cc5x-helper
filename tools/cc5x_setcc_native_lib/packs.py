@@ -280,7 +280,9 @@ def list_devices_in_unpacked_packs(
                 for device_name in _extract_device_names_from_members(member_names):
                     if normalized_prefixes and not device_name.startswith(normalized_prefixes):
                         continue
-                    if version_key < best_version_by_device.get(device_name, ()):
+                    if device_name in best_version_by_device and (
+                        version_key <= best_version_by_device[device_name]
+                    ):
                         continue
                     best_version_by_device[device_name] = version_key
                     best_by_device[device_name] = {
