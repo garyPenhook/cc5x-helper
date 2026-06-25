@@ -101,6 +101,24 @@ class Recovery(unittest.TestCase):
         self.assertTrue(any(f.get("error") == "escape" for f in out))
         self.assertTrue(any(f.get("seq") == 11 for f in out))
 
+    def test_double_escape_is_rejected_not_normalized(self):
+        # A pending escape must consume the next byte even when it is itself ESC. The
+        # old order (check b==ESC before the escape state) let `ESC ESC` re-arm the
+        # escape, so inserting a stray ESC before a valid ESC ESC_FLAG pair decoded to
+        # the *same* valid frame -- malformed wire silently accepted. Here the stray
+        # ESC lands just before the golden frame's `7d 5e` pair (index 8).
+        tampered = GOLDEN_RELAY[:8] + b"\x7d" + GOLDEN_RELAY[8:]
+        out = list(c.Deframer().feed(tampered))
+        self.assertEqual([f.get("error") for f in out], ["escape"])
+        self.assertFalse(any(f.get("name") == "RELAY" for f in out))
+
+    def test_escaped_esc_and_flag_still_decode(self):
+        # The fix must not break legitimate stuffing: ESC ESC_ESC -> 0x7D and
+        # ESC ESC_FLAG -> 0x7E as data bytes round-trip through the deframer.
+        frame = c.encode("RELAY", 3, tstamp=0, data=bytes([0x7D, 0x7E, 0x41]))
+        out = list(c.Deframer().feed(frame))
+        self.assertEqual(out[0]["data"], bytes([0x7D, 0x7E, 0x41]))
+
     def test_unknown_type_passes_through(self):
         # A well-formed frame with an unallocated TYPE: name=None, raw args, no error.
         body = bytes([0x7A, 0x00, 0x01, 0xAB])               # TYPE 0x7A unallocated
