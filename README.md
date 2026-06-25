@@ -513,5 +513,3 @@ Validation uses the real `CC5X.EXE` under CrossOver/Wine.
 - Alias-heavy areas such as EUSART and MSSP still need additional compatibility refinement.
 - The manifest workflow covers the useful persisted state from `setcc.pxk`, not every GUI preference.
 - This repo does not bundle proprietary CC5X binaries or Microchip packs as tracked source files.
-</content>
-</invoke>
