@@ -1,0 +1,17 @@
+
+CC5X Version 3.8A, Copyright (c) B Knudsen Data.
+* FUNCTION CALL STRUCTURE
+
+F: cdl_crc8               :#1  : p0 <- p0 
+
+F: cdl_send               :#1  : p0 <- p0 
+    cdl_crc8              : #1  : p0 -> p0
+
+F: main                   :#0  : p0
+    cdl_send              : #1  : p0 -> p0
+
+
+ L0  main
+ L1    cdl_send
+ L2      cdl_crc8
+

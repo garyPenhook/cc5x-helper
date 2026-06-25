@@ -32,9 +32,13 @@ class ProjectFile:
     base_build_options: list[str] = field(default_factory=list)
     editions: dict[str, ProjectEdition] = field(default_factory=dict)
     mplab_root: str | None = None
+    # Opaque pass-through for the `debug-stub` generator's config (debuggen.py validates it).
+    # Preserved verbatim across load/edit/write so a mutation command does not erase a
+    # hand-added "debug" section. Omitted from the serialized manifest when None.
+    debug: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "version": self.version,
             "device": self.device,
             "compiler": self.compiler,
@@ -55,6 +59,9 @@ class ProjectFile:
                 for name, edition in sorted(self.editions.items())
             },
         }
+        if self.debug is not None:
+            payload["debug"] = self.debug
+        return payload
 
 
 def default_project_manifest(
@@ -183,6 +190,9 @@ def load_project_file(path: Path) -> ProjectFile:
     if isinstance(version, bool) or not isinstance(version, int):
         raise ValueError(f"{path}: field 'version' must be an integer, got {type(version).__name__}")
     header_mode = _optional_str(header.get("mode"), "'header.mode'", path) or "generated"
+    debug_section = payload.get("debug")
+    if debug_section is not None and not isinstance(debug_section, dict):
+        raise ValueError(f"{path}: 'debug' must be an object")
     return ProjectFile(
         version=version,
         device=normalize_device_name(_require_str(payload, "device", path)),
@@ -195,6 +205,7 @@ def load_project_file(path: Path) -> ProjectFile:
         base_build_options=_as_str_list(payload.get("build_options"), "'build_options'", path),
         editions=editions,
         mplab_root=_optional_str(payload.get("mplab_root"), "'mplab_root'", path),
+        debug=debug_section,
     )
 
 
