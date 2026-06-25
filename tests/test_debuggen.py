@@ -337,6 +337,78 @@ class StubEmissionTests(unittest.TestCase):
         self.assertIn("RC1STA = 0x90;", c)             # SPEN(0x80) | CREN(0x10)
         self.assertIn("while (PIR1 & 0x20) cdl_rx_byte(RC1REG);", c)  # real poll, not stub
 
+    def test_rx_caps_gated_on_receive_path(self):
+        # Full tier on an EUSART with TX but no RCREG/RCIF advertises no host->target
+        # commands -- the stub emits only the empty poll stub and could never dispatch.
+        g = debuggen.generate_debug_stub(
+            make_metadata(with_rx=False),
+            {"tier": "full", "transport": {"tx_pin": "RB7", "brg": 25}, "channels": [{"name": "s"}]},
+        )
+        caps = json.loads(g.map_json)["capabilities"]
+        self.assertEqual(caps["bits"], 0)
+        self.assertFalse(caps["mem_read"])
+        self.assertFalse(caps["mem_write"])
+        self.assertIn("// No EUSART RX register", g.monitor_c)  # empty poll stub, not the receiver
+
+    def test_toggle_fixed_site_emits_all_pins(self):
+        # Regression: multi-site fixed-site toggle must pulse a distinct pin per site,
+        # selected by marker id -- not always toggle_pins[0].
+        g = debuggen.generate_debug_stub(
+            make_metadata(),
+            {"tier": "toggle",
+             "toggle": {"encoding": "fixed-site", "pins": ["RB7", "RB5", "RA0"]},
+             "channels": [{"name": "a"}, {"name": "b"}, {"name": "c"}]},
+        )
+        c = g.monitor_c
+        self.assertIn("LATB = LATB | 0x80;", c)   # RB7 site 0
+        self.assertIn("LATB = LATB | 0x20;", c)   # RB5 site 1
+        self.assertIn("LATA = LATA | 0x01;", c)   # RA0 site 2
+        self.assertIn("if (id == 0)", c)
+        self.assertIn("} else if (id == 1)", c)
+        self.assertIn("} else if (id == 2)", c)
+
+    def test_toggle_single_pin_stays_branchless(self):
+        g = debuggen.generate_debug_stub(
+            make_metadata(),
+            {"tier": "toggle", "toggle": {"encoding": "fixed-site", "pins": ["RA0"]},
+             "channels": [{"name": "a"}]},
+        )
+        c = g.monitor_c
+        self.assertNotIn("if (id ==", c)          # no dispatch ladder for a single site
+        self.assertIn("a single pulse", c)
+
+    def test_write_mem_dispatch_and_whitelist(self):
+        # write_mem true emits a real WRITE_MEM path gated by a GPR-RAM whitelist that
+        # NAKs WRITE_DENIED; SFR space (page-0 < 0x20) is never writable.
+        g = debuggen.generate_debug_stub(
+            make_metadata(),
+            {"tier": "full", "transport": {"tx_pin": "RB7", "rx_pin": "RB5", "brg": 25},
+             "write_mem": True, "channels": [{"name": "s"}]},
+        )
+        c = g.monitor_c
+        self.assertIn("} else if (type == CDL_T_WRITE_MEM) {", c)
+        self.assertIn("static void cdl_write_mem(uns8 refseq, uns8 lo, uns8 hi, uns8 n) {", c)
+        self.assertIn("static uns8 cdl_addr_writable(uns8 lo, uns8 hi) {", c)
+        self.assertIn("cdl_nak(refseq, CDL_NAK_WRITE_DENIED)", c)
+        self.assertIn("lo >= 0x20", c)            # GPR starts at 0x20 on page 0; SFRs excluded
+        self.assertTrue(json.loads(g.map_json)["capabilities"]["mem_write"])
+
+    def test_write_mem_absent_by_default(self):
+        c = self._gen().monitor_c  # default payload leaves write_mem off
+        self.assertNotIn("CDL_T_WRITE_MEM", c)
+        self.assertNotIn("cdl_write_mem", c)
+        self.assertNotIn("cdl_addr_writable", c)
+
+    def test_writable_ranges_excludes_sfrs(self):
+        ranges = debuggen._writable_ranges(make_metadata())
+        flat: set[int] = set()
+        for page, lo, hi_lo in ranges:
+            self.assertLessEqual(lo, hi_lo)
+            flat.update((page << 8) | b for b in range(lo, hi_lo + 1))
+        self.assertNotIn(0x000, flat)             # core SFRs
+        self.assertNotIn(0x01F, flat)
+        self.assertIn(0x020, flat)                # first GPR
+
     def test_device_id_in_header(self):
         h = self._gen().monitor_h
         self.assertIn("#define CDL_DEVID_HI      0xA3", h)

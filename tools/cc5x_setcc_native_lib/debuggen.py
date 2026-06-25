@@ -285,6 +285,42 @@ def _sum_ram_bytes(metadata: DeviceMetadata) -> int:
     return len(covered)
 
 
+def _writable_ranges(metadata: DeviceMetadata) -> list[tuple[int, int, int]]:
+    """Per-(hi-page) writable GPR sub-ranges for WRITE_MEM, as ``(page, lo, hi_lo)``:
+    an address A is writable iff ``(A >> 8) == page`` and ``lo <= (A & 0xFF) <= hi_lo``.
+
+    Whitelist = device GPR data RAM (RAMBANK + COMMON, from pack metadata) minus the
+    ICD-reserved RAM. This refuses SFRs, config/calibration words and unimplemented
+    space by construction (01 SS 6 write blacklist). Ranges are split at 256-byte
+    boundaries so the generated stub compares ``hi``/``lo`` as plain uns8.
+
+    Caveat: the stub's own GPR state (rx ring, SEQ, bp mask) lives at link-time
+    addresses inside this same GPR space and cannot be excluded at codegen, so an
+    enabled WRITE_MEM still lets a host corrupt the stub. WRITE_MEM stays off by
+    default (01 SS 6) for exactly this reason.
+    """
+    allow: set[int] = set()
+    for r in [*metadata.ram_ranges, *metadata.common_ranges]:
+        if r.end >= r.start:
+            allow.update(range(r.start, r.end + 1))
+    for r in metadata.icd_ram_ranges:
+        if r.end >= r.start:
+            allow.difference_update(range(r.start, r.end + 1))
+    if not allow:
+        return []
+    out: list[tuple[int, int, int]] = []
+    addrs = sorted(allow)
+    start = prev = addrs[0]
+    for a in addrs[1:]:
+        if a == prev + 1 and (a >> 8) == (start >> 8):
+            prev = a
+            continue
+        out.append((start >> 8, start & 0xFF, prev & 0xFF))
+        start = prev = a
+    out.append((start >> 8, start & 0xFF, prev & 0xFF))
+    return out
+
+
 def _first_present(names: tuple[str, ...], present: set[str]) -> str | None:
     for name in names:
         if name in present:
@@ -500,11 +536,18 @@ def _device_id(metadata: DeviceMetadata) -> int:
 def _capabilities(config: DebugConfig, caps: DeviceCaps, decision: TierDecision) -> int:
     bits = 0
     if decision.tier in ("full", "min"):
-        bits |= CAP_MEM_READ | CAP_RX_COMMANDS
-        if config.breakpoints == "software":
-            bits |= CAP_SW_BREAKPOINTS
-        if config.write_mem:
-            bits |= CAP_MEM_WRITE
+        # Every capability below is a host->target command serviced by the RX
+        # dispatcher. Without a usable receive path the stub emits only the empty
+        # cdl_poll() stub, so advertising any of them would make the host issue
+        # commands that are silently never dispatched. Gate them all on has_rx --
+        # a full/min device whose EUSART has TX but no RCREG/RCIF degrades to a
+        # trace-only build that advertises no commands.
+        if caps.eusart is not None and caps.eusart.has_rx:
+            bits |= CAP_MEM_READ | CAP_RX_COMMANDS
+            if config.breakpoints == "software":
+                bits |= CAP_SW_BREAKPOINTS
+            if config.write_mem:
+                bits |= CAP_MEM_WRITE
         # NOTE: CAP_TARGET_TICK is intentionally NOT advertised: the v1 stub does not yet
         # read a timer or append a target timestamp to TRACE frames. Advertising it would
         # make the PC decoder expect timestamp bytes the target never sends. The config
@@ -780,14 +823,16 @@ def _render_source(
     init.append("")
     lines += init
 
-    lines += _render_rx_handler(config, eu)
+    lines += _render_rx_handler(config, eu, metadata)
     return "\n".join(lines) + "\n"
 
 
-def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
-    """Tier A receive + command dispatch (PING/READ_MEM/SET_BP/CLR_BP/CONTINUE)."""
+def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMetadata) -> list[str]:
+    """Tier A receive + command dispatch (PING/READ_MEM/WRITE_MEM/SET_BP/CLR_BP/CONTINUE)."""
     have_rx = eu.has_rx
     sw_bp = config.breakpoints == "software"
+    write_mem = config.write_mem
+    writable = _writable_ranges(metadata) if write_mem else []
     lines: list[str] = [
         "#define CDL_RX_MAX 16",
         "static uns8 cdl_rx[CDL_RX_MAX + 1];",
@@ -840,6 +885,48 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
         "    cdl_send(CDL_T_MEM_DATA, a, 2 + n);",
         "}",
         "",
+    ]
+    if write_mem:
+        # WRITE_MEM whitelist: only addresses inside the device's GPR data RAM are
+        # writable (01 SS 6); SFRs/config/ICD-RAM/unimplemented space are NAK'd
+        # WRITE_DENIED. Verify the whole range before touching memory so a partly
+        # out-of-range write performs no partial write. See _writable_ranges for the
+        # stub-self-state caveat.
+        check = [
+            "static uns8 cdl_addr_writable(uns8 lo, uns8 hi) {",
+        ]
+        if writable:
+            for page, lo, hi_lo in writable:
+                check.append(
+                    f"    if (hi == 0x{page:02X} && lo >= 0x{lo:02X} && lo <= 0x{hi_lo:02X}) return 1;"
+                )
+        check.append("    return 0;")
+        check.append("}")
+        lines += check
+        lines += [
+            "",
+            "static void cdl_write_mem(uns8 refseq, uns8 lo, uns8 hi, uns8 n) {",
+            "    uns8 i, l, h;",
+            "    if (n > CDL_RX_MAX) { cdl_nak(refseq, CDL_NAK_BAD_LEN); return; }",
+            "    l = lo;",
+            "    h = hi;",
+            "    for (i = 0; i < n; i++) {           // refuse the whole frame if any byte is off-limits",
+            "        if (cdl_addr_writable(l, h) == 0) { cdl_nak(refseq, CDL_NAK_WRITE_DENIED); return; }",
+            "        l++;",
+            "        if (l == 0) h++;",
+            "    }",
+            "    FSR0L = lo;",
+            "    FSR0H = hi;",
+            "    for (i = 0; i < n; i++) {",
+            "        INDF0 = cdl_rx[5 + i];",
+            "        FSR0L++;",
+            "        if (FSR0L == 0) FSR0H++;",
+            "    }",
+            "    cdl_ack(refseq);",
+            "}",
+            "",
+        ]
+    lines += [
         "static void cdl_dispatch(void) {",
         "    uns8 type, seq, len, crc, i;",
         "    if (cdl_rxn < 4) return;            // TYPE SEQ LEN ... CRC",
@@ -858,6 +945,12 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
         "        if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
         "        cdl_read_mem(cdl_rx[3], cdl_rx[4], cdl_rx[5]);",
     ]
+    if write_mem:
+        lines += [
+            "    } else if (type == CDL_T_WRITE_MEM) {",
+            "        if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // addr_lo addr_hi + >=1 byte",
+            "        cdl_write_mem(seq, cdl_rx[3], cdl_rx[4], len - 2);",
+        ]
     if sw_bp:
         lines += [
             "    } else if (type == CDL_T_SET_BP) {",
@@ -925,35 +1018,63 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
 
 
 def _render_toggle_source(lines: list[str], metadata: DeviceMetadata, config: DebugConfig) -> str:
-    """Tier C: a single timed GPIO pulse per CDL_MARK (fixed-site default)."""
-    pin = config.toggle_pins[0] if config.toggle_pins else (config.tx_pin or "RA0")
-    m = _PIN_RE.match(pin.upper())
-    if not m:
-        raise ValueError(f"toggle pin {pin!r} is not a valid Rxn name")
-    port_letter, bit = m.group(1), int(m.group(2))
-    lat = f"LAT{port_letter}"
-    tris = f"TRIS{port_letter}"
+    """Tier C: a single timed GPIO pulse per CDL_MARK (fixed-site default).
+
+    Fixed-site encoding gives each marked site its own pin (validation enforces one
+    pin per channel), and cdl_mark(id) pulses the pin owned by site `id` so the probe
+    can tell sites apart. With one pin (or none) the body is a single branchless pulse;
+    with several it dispatches on `id`. With no configured pins, fall back to one
+    default pin.
+    """
+    pins = list(config.toggle_pins) or [config.tx_pin or "RA0"]
     sfr_names = {s.name for s in metadata.sfrs}
-    out_reg = lat if lat in sfr_names else f"PORT{port_letter}"
-    if out_reg not in sfr_names or tris not in sfr_names:
-        raise ValueError(f"toggle pin {pin!r} needs {tris}/{out_reg} which are absent from metadata")
+    sites: list[tuple[str, str, int, str]] = []  # (out_reg, tris, bit, pin); index == marker id
+    for pin in pins:
+        m = _PIN_RE.match(pin.upper())
+        if not m:
+            raise ValueError(f"toggle pin {pin!r} is not a valid Rxn name")
+        port_letter, bit = m.group(1), int(m.group(2))
+        lat = f"LAT{port_letter}"
+        tris = f"TRIS{port_letter}"
+        out_reg = lat if lat in sfr_names else f"PORT{port_letter}"
+        if out_reg not in sfr_names or tris not in sfr_names:
+            raise ValueError(f"toggle pin {pin!r} needs {tris}/{out_reg} which are absent from metadata")
+        sites.append((out_reg, tris, bit, pin))
+
     lines += [
         "// Tier C: timestamping is done by the probe; the target only pulses a pin.",
         f"// Encoding: {config.toggle_encoding}",
         "",
         "void cdl_init(void) {",
-        f"    {tris} = {tris} & 0x{0xFF & ~(1 << bit):02X};  // {_safe_comment(pin)} output",
-        f"    {out_reg} = {out_reg} & 0x{0xFF & ~(1 << bit):02X};",
-        "}",
-        "",
-        "void cdl_mark(uns8 id) {",
-        "    // fixed-site: a single pulse; the site is identified by which pin it is on.",
-        f"    {out_reg} = {out_reg} | 0x{1 << bit:02X};",
-        "    nop();",
-        "    nop();",
-        f"    {out_reg} = {out_reg} & 0x{0xFF & ~(1 << bit):02X};",
-        "}",
     ]
+    for out_reg, tris, bit, pin in sites:
+        lines += [
+            f"    {tris} = {tris} & 0x{0xFF & ~(1 << bit):02X};  // {_safe_comment(pin)} output",
+            f"    {out_reg} = {out_reg} & 0x{0xFF & ~(1 << bit):02X};",
+        ]
+    lines += ["}", "", "void cdl_mark(uns8 id) {"]
+    if len(sites) == 1:
+        out_reg, _tris, bit, _pin = sites[0]
+        lines += [
+            "    // fixed-site: a single pulse; the site is identified by which pin it is on.",
+            f"    {out_reg} = {out_reg} | 0x{1 << bit:02X};",
+            "    nop();",
+            "    nop();",
+            f"    {out_reg} = {out_reg} & 0x{0xFF & ~(1 << bit):02X};",
+        ]
+    else:
+        lines.append("    // fixed-site: pulse the pin owned by site `id`.")
+        for idx, (out_reg, _tris, bit, pin) in enumerate(sites):
+            head = "    if" if idx == 0 else "    } else if"
+            lines += [
+                f"{head} (id == {idx}) {{          // {_safe_comment(pin)}",
+                f"        {out_reg} = {out_reg} | 0x{1 << bit:02X};",
+                "        nop();",
+                "        nop();",
+                f"        {out_reg} = {out_reg} & 0x{0xFF & ~(1 << bit):02X};",
+            ]
+        lines.append("    }")
+    lines.append("}")
     return "\n".join(lines) + "\n"
 
 
