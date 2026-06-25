@@ -423,5 +423,58 @@ class StubEmissionTests(unittest.TestCase):
         self.assertIn("#define CDL_DEVID_LO      0x05", h)
 
 
+class BaudComputation(unittest.TestCase):
+    """P3: codegen derives SPBRG from Fosc+baud (brg.py) with datasheet provenance,
+    keeps a manual transport.brg override, and rejects unreachable rates."""
+
+    def _gen(self, transport):
+        payload = {"tier": "full", "transport": {"tx_pin": "RB7", **transport},
+                   "channels": [{"name": "state"}]}
+        return debuggen.generate_debug_stub(make_metadata(), payload)
+
+    def test_computes_spbrg_from_fosc_baud(self):
+        gen = self._gen({"fosc": 32_000_000, "baud": 9600})
+        self.assertIn("#define CDL_SPBRG_VALUE 0x33", gen.monitor_c)   # 51, BRGH=0
+        self.assertIn("onlinedocs.microchip.com", gen.monitor_c)       # provenance URL
+        baud = json.loads(gen.map_json)["baud"]
+        self.assertEqual(baud["spbrg"], 51)
+        self.assertFalse(baud["brgh"])
+        self.assertTrue(baud["computed"])
+        self.assertEqual(baud["actual"], 9615)
+        self.assertIn("microchip", baud["source_url"].lower())
+
+    def test_computed_brgh_overrides_default(self):
+        # 4 MHz/9600 needs BRGH=1; the computed bit must win over the brgh default.
+        baud = json.loads(self._gen({"fosc": 4_000_000, "baud": 9600}).map_json)["baud"]
+        self.assertTrue(baud["brgh"])
+        self.assertEqual(baud["spbrg"], 25)
+
+    def test_manual_brg_override_kept(self):
+        gen = self._gen({"brg": 25})
+        self.assertIn("#define CDL_SPBRG_VALUE 0x19", gen.monitor_c)   # 0x19 = 25
+        baud = json.loads(gen.map_json)["baud"]
+        self.assertFalse(baud["computed"])
+        self.assertEqual(baud["spbrg"], 25)
+        self.assertIn("override", baud["source"])
+
+    def test_unreachable_baud_rejected(self):
+        # 300 baud at 32 MHz: no in-range 8-bit SPBRG -> generation fails clearly.
+        with self.assertRaises(ValueError):
+            self._gen({"fosc": 32_000_000, "baud": 300})
+
+    def test_high_error_rejected(self):
+        # 230400 at 32 MHz: best 8-bit error ~-3.55% exceeds tolerance -> rejected.
+        with self.assertRaises(ValueError):
+            self._gen({"fosc": 32_000_000, "baud": 230400})
+
+    def test_validation_mentions_fosc_when_no_baud_info(self):
+        meta = make_metadata()
+        cfg = debuggen.parse_debug_config({"tier": "full", "transport": {"tx_pin": "RB7"}})
+        caps = debuggen.detect_caps(meta)
+        decision = debuggen.select_tier(cfg, caps)
+        errs = debuggen.validate_debug(cfg, caps, decision)
+        self.assertTrue(any("fosc" in e for e in errs))
+
+
 if __name__ == "__main__":
     unittest.main()
