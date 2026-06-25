@@ -1501,5 +1501,57 @@ class ResolveProjectManifestTests(unittest.TestCase):
         self.assertEqual(args.project, "setcc-native.json")
 
 
+class MeasureGateCodexFixes(unittest.TestCase):
+    """Regressions for the two Codex findings on the P2 measure gate. The compile
+    step is CrossOver-gated, so these exercise the pure-Python parts: provisional
+    tier selection and the harness's entry-point call set."""
+
+    class _Stop(Exception):
+        pass
+
+    def _run_capture_provisional(self, debug_config: dict) -> list:
+        """Run measure_debug_stub far enough to capture the tier of the *provisional*
+        generate_debug_stub call, then stop at run_measure_gate."""
+        seen: list = []
+
+        def rec_gen(metadata, payload):
+            seen.append(payload.get("tier"))
+            return types.SimpleNamespace(decision=object(), caps=object())
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(validate_headers, "VALIDATION_ROOT", Path(tmp)), \
+                unittest.mock.patch.object(validate_headers, "_metadata_for", return_value=object()), \
+                unittest.mock.patch.object(validate_headers, "generate_device_header", return_value=""), \
+                unittest.mock.patch.object(validate_headers.debuggen, "generate_debug_stub",
+                                           side_effect=rec_gen), \
+                unittest.mock.patch.object(validate_headers.debuggen, "run_measure_gate",
+                                           side_effect=self._Stop):
+            with self.assertRaises(self._Stop):
+                validate_headers.measure_debug_stub("PIC16F15244", ["runner"], None, debug_config)
+        return seen
+
+    def test_provisional_honors_forced_tier(self):
+        # A project forcing 'trace' must be measured as 'trace', not re-auto-selected.
+        seen = self._run_capture_provisional({"tier": "trace", "transport": {"brg": 25}})
+        self.assertEqual(seen[0], "trace")
+
+    def test_provisional_defaults_to_auto_when_unset(self):
+        seen = self._run_capture_provisional({"transport": {"brg": 25}})
+        self.assertEqual(seen[0], "auto")
+
+    def test_toggle_header_gets_cdl_mark_call(self):
+        harness = validate_headers._measurement_harness(
+            "d.H", "stub.c", "void cdl_init(void);\nvoid cdl_mark(uns8 id);\n")
+        self.assertIn("cdl_mark(0);", harness)
+        self.assertIn("cdl_init();", harness)
+
+    def test_full_header_has_no_mark_call(self):
+        harness = validate_headers._measurement_harness(
+            "d.H", "stub.c",
+            "void cdl_init(void);\nvoid cdl_trace(uns8 ch, uns16 value);\nvoid cdl_poll(void);\n")
+        self.assertNotIn("cdl_mark", harness)
+        self.assertIn("cdl_trace(0, 0);", harness)
+
+
 if __name__ == "__main__":
     unittest.main()
