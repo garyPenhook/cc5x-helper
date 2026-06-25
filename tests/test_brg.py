@@ -64,6 +64,19 @@ class Selection(unittest.TestCase):
         self.assertFalse(brg.compute_brg(32_000_000, 9600).brgh)
 
 
+class BrghAvailability(unittest.TestCase):
+    def test_allow_brgh_false_restricts_to_div64(self):
+        # 4 MHz/9600 is best in ÷16 (BRGH=1); with allow_brgh=False only ÷64 is tried,
+        # so the returned mode must be BRGH=0 even though it fits poorly.
+        sol = brg.compute_brg(4_000_000, 9600, allow_brgh=False)
+        self.assertFalse(sol.brgh)
+        self.assertEqual(sol.multiplier, 64)
+
+    def test_allow_brgh_false_ok_when_div64_fits(self):
+        sol = brg.compute_brg(32_000_000, 9600, allow_brgh=False)
+        self.assertEqual((sol.spbrg, sol.brgh), (51, False))
+
+
 class OutOfRange(unittest.TestCase):
     def test_too_slow_for_8bit_raises(self):
         # 300 baud at 32 MHz needs n>255 in both 8-bit modes -> 16-bit territory.

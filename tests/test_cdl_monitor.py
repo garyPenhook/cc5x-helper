@@ -18,6 +18,7 @@ from pathlib import Path
 import cc5x_setcc_native as cli
 from cc5x_setcc_native_lib import cdl_codec as codec
 from cc5x_setcc_native_lib import cdl_monitor as mon
+from cc5x_setcc_native_lib import cdl_proto as proto
 
 
 def make_map(**over) -> mon.MonitorMap:
@@ -141,6 +142,20 @@ class MapApplication(unittest.TestCase):
         ev = list(m.feed(relay(0, 1, inner)))[0]
         self.assertEqual(ev.kind, "trace")
         self.assertEqual(ev.fields["value"], 0x1234)
+
+    def test_no_map_learns_tick_from_hello_caps(self):
+        # Regression: without a map, a ticked TRACE must not fold tick+value into one
+        # wide value. The Monitor learns tick-presence from the preceding HELLO's
+        # CAP_TARGET_TICK so tick (0x0102) and value (0x09) decode separately.
+        m = mon.Monitor(None)
+        hello = codec.encode("HELLO", 0, ver=1, devid=0x1, caps=proto.CAP_TARGET_TICK,
+                             tier=1, ch_count=1)
+        trace = codec.encode("TRACE", 1, bind={"tick": True, "value": 1},
+                             ch=0, tick=0x0102, value=0x09)
+        events = list(m.feed(relay(0, 5, hello, trace)))
+        tr = [e for e in events if e.kind == "trace"][0]
+        self.assertEqual(tr.fields["tick"], 0x0102)
+        self.assertEqual(tr.fields["value"], 0x09)
 
     def test_stub_uns16_value_with_default_map_width_1(self):
         # Regression (Codex P1): the v0.1 stub always emits a 2-byte value, while a
