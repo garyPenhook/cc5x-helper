@@ -318,6 +318,14 @@ class StubEmissionTests(unittest.TestCase):
         self.assertIn("if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)
         self.assertIn("CDL_NAK_BAD_LEN", c)
 
+    def test_frame_length_must_match_exactly(self):
+        # A frame with valid command+CRC followed by trailing bytes has len < cdl_rxn-4;
+        # the dispatcher must drop it (exact match), not execute the command. Mirrors the
+        # reference decoder, which rejects on length != len(args).
+        c = self._gen().monitor_c
+        self.assertIn("if (len != (cdl_rxn - 4)) return;", c)
+        self.assertNotIn("if (len > (cdl_rxn - 4)) return;", c)
+
     def test_ack_payload_is_ref_seq_only(self):
         # ACK ARG is ref_seq only (cdl_proto ACK); NAK carries ref_seq + code.
         # A 2-byte ACK is rejected by the reference decoder (trailing byte).

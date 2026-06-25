@@ -933,7 +933,7 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         "    type = cdl_rx[0];",
         "    seq = cdl_rx[1];",
         "    len = cdl_rx[2];",
-        "    if (len > (cdl_rxn - 4)) return;     // need TYPE SEQ LEN <len> CRC; cdl_rxn>=4 above",
+        "    if (len != (cdl_rxn - 4)) return;    // exact len: TYPE SEQ LEN <len> CRC, no trailing bytes",
         "    crc = cdl_crc8(0, type);",
         "    crc = cdl_crc8(crc, seq);",
         "    crc = cdl_crc8(crc, len);",
