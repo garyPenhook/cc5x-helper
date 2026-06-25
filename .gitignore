@@ -38,3 +38,8 @@ cc5x-38.pdf
 # Machine-specific project manifest (absolute compiler/runner paths); not portable.
 setcc-native.json
 .coverage
+
+# Checked-in test fixtures under tests/golden/ are inputs (sample CC5X .occ/.var/.fcs
+# reports the parsers run against), NOT build artifacts -- never let the *.occ/*.var/etc.
+# rules above ignore them, or CI checks out a tree without them and test_measure fails.
+!tests/golden/**

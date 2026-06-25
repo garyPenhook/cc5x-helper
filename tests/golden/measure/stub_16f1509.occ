@@ -1,0 +1,22 @@
+Y:\apps\cc5x-helper\cc5x_paid\CC5X\CC5X.EXE -V -Q -I. p2stub.c
+CC5X Version 3.8A, Copyright (c) B Knudsen Data, Norway 1992-2022, No. 2683
+ --> STANDARD edition, 8-32 bit int, 16-32 bit float, 32k code
+p2stub.c:
+ 24. Jun 2026  19:52
+ Chip = 16F1509
+ RAM : -------- -------- -------- -------- ===..... ........ ....**** ********
+  40h: ******** ******** ******** ******** ******** ******** 7******* ********
+  80h: -------- -------- -------- -------- ******** ******** ******** ********
+  C0h: ******** ******** ******** ******** ******** ******** -------- --------
+ Bank  0:60   1:80   2:80   3:80   4:80   5:80   6:16   bytes free
+RAM usage: 21 bytes (3 local), 491 bytes free
+ File 'p2stub.fcs'
+ Optimizing - removed 1 instructions (-5 %)
+ File 'p2stub.var'
+ File 'p2stub.occ'
+ File 'p2stub.hex'
+ Codepage 0 has   18 word(s) :   0 %
+ Codepage 1 has    0 word(s) :   0 %
+ Codepage 2 has    0 word(s) :   0 %
+ Codepage 3 has    0 word(s) :   0 %
+Total of 18 code words (0 %)
