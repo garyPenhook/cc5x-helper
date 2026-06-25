@@ -20,11 +20,12 @@ from cc5x_setcc_native_lib.headergen import render_full_header
 from cc5x_setcc_native_lib.picmeta import load_device_metadata
 from cc5x_setcc_native_lib.project import load_project_file
 
-# Extra CC5X flags that make the compiler emit the variable list (.var) and the call
-# structure (.fcs) the measure gate needs (the .occ is emitted by default). These are
-# the project's stated CC5X 3.8 convention (see measure.py's module docstring); override
-# with CC5X_REPORT_FLAGS="-V -Q ..." for a different toolchain version. Not exercised by
-# the unit suite -- it needs the real CrossOver compiler.
+# Full compile flags for the measure gate: -V emits the variable list (<src>.var) and
+# -Q the call tree (<src>.fcs); the .occ budget file is written by default (CC5X 3.8
+# manual, cc5x_paid/cc5x-38.pdf, options -V/-Q). These flags REPLACE the normal -S
+# (silent): -S together with both -V and -Q is a CC5X bug that aborts with "Error
+# opening file <src>.occ" (verified empirically on CC5X 3.8A); -V -Q alone works.
+# Override with CC5X_REPORT_FLAGS for a different toolchain version.
 CC5X_REPORT_FLAGS = shlex.split(os.environ.get("CC5X_REPORT_FLAGS", "-V -Q"))
 
 
@@ -120,7 +121,7 @@ def run_compile(
     label: str,
     device: str,
     timeout: float | None,
-    extra_flags: list[str] = (),
+    compile_flags: list[str] = ("-S",),
 ) -> CompileResult:
     windows_include = to_windows_path(include_dir)
     windows_source = to_windows_path(source_path)
@@ -129,7 +130,7 @@ def run_compile(
     hex_path = stem.with_suffix(".hex")
     try:
         completed = subprocess.run(
-            [*runner, "-S", *extra_flags, f"-I{windows_include}", windows_source],
+            [*runner, *compile_flags, f"-I{windows_include}", windows_source],
             cwd=source_path.parent,
             text=True,
             capture_output=True,
@@ -226,6 +227,31 @@ def _metadata_for(device: str):
     )
 
 
+# Public entry points a generated stub may expose, with a measurement call for each.
+# Only those actually declared in the stub header are referenced (lower tiers omit
+# some), so the harness compiles at every tier without touching an undefined symbol.
+_STUB_ENTRY_CALLS = {
+    "cdl_init": "cdl_init();",
+    "cdl_trace": "cdl_trace(0, 0);",
+    "cdl_poll": "cdl_poll();",
+    "cdl_bp": "cdl_bp(0);",
+}
+
+
+def _measurement_harness(device_header_name: str, stub_c_name: str, stub_h_text: str) -> str:
+    """A standalone TU that makes the stub fragment measurable: pull in the device header
+    (SFRs + CC5X types), then the stub source, then a main() that calls every public
+    entry point the stub header declares so CC5X keeps (and budgets) all of them."""
+    calls = [call for fn, call in _STUB_ENTRY_CALLS.items() if f"{fn}(" in stub_h_text]
+    body = "\n".join(f"    {c}" for c in calls)
+    return (
+        f'// Generated measurement harness (P2 gate) -- DO NOT EDIT.\n'
+        f'#include "{device_header_name}"\n'
+        f'#include "{stub_c_name}"\n'
+        f'void main(void) {{\n{body}\n}}\n'
+    )
+
+
 def measure_debug_stub(
     device: str,
     runner: list[str],
@@ -256,25 +282,35 @@ def measure_debug_stub(
     build_dir = VALIDATION_ROOT / short / "debug-stub"
     build_dir.mkdir(parents=True, exist_ok=True)
 
+    device_header = generate_device_header(device)
+
     def gen_for(tier: str) -> debuggen.GeneratedDebug:
         # Override only the tier; keep brg/channels/pins/breakpoints from the project.
         return debuggen.generate_debug_stub(metadata, {**debug_config, "tier": tier})
 
     def measure_at(tier: str) -> debuggen.Measurement:
+        # The stub is a *fragment*: no main, and it relies on the device header for SFRs
+        # and CC5X types. Wrap it in a harness TU (device header + stub + a main that
+        # touches every public entry point so none is dead-stripped) -- this is the
+        # p2stub.c pattern the golden fixtures were produced with.
         gen = gen_for(tier)
+        short = short_device_name(device)
+        atomic_write_text(build_dir / f"{short}.H", device_header, encoding="latin-1")
         atomic_write_text(build_dir / gen.monitor_h_name, gen.monitor_h, encoding="latin-1")
-        src = build_dir / gen.monitor_c_name
-        atomic_write_text(src, gen.monitor_c, encoding="latin-1")
+        atomic_write_text(build_dir / gen.monitor_c_name, gen.monitor_c, encoding="latin-1")
+        harness = _measurement_harness(f"{short}.H", gen.monitor_c_name, gen.monitor_h)
+        src = build_dir / "measure_main.c"
+        atomic_write_text(src, harness, encoding="latin-1")
         res = run_compile(
             runner=runner, include_dir=build_dir, source_path=src,
             header_path=build_dir / gen.monitor_h_name, label=f"debug-stub:{tier}",
-            device=device, timeout=timeout, extra_flags=report_flags,
+            device=device, timeout=timeout, compile_flags=report_flags,
         )
         if not res.succeeded:
             raise RuntimeError(
                 f"{device}: debug-stub compile failed at tier {tier!r} "
-                f"(rc={res.returncode})\n{res.stderr.strip()}")
-        return measure.read_reports(build_dir, Path(gen.monitor_c_name).stem)
+                f"(rc={res.returncode})\n{(res.stderr or res.stdout).strip()}")
+        return measure.read_reports(build_dir, src.stem)
 
     provisional = gen_for("auto")
     result = debuggen.run_measure_gate(
