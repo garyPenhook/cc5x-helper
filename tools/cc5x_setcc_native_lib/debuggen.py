@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .cdl_proto import (
@@ -48,6 +49,7 @@ from .cdl_proto import (
 )
 from .cdl_protogen import render_proto_defines
 from .headergen import _safe_comment, _safe_identifier
+from .measure import FcsReport, OccReport, VarSymbol
 from .picmeta import DeviceMetadata
 
 
@@ -603,6 +605,201 @@ def build_map(
             "sites": [{"id": ch.id, "name": ch.name} for ch in config.channels],
         }
     return payload
+
+
+# --------------------------------------------------------------------------------------
+# Measured-budget gate (P2): confirm or demote the provisional tier from real CC5X
+# reports, and fill the map's symbols/budget. 02 §6 acceptance gate. The reports are
+# parsed by :mod:`measure`; nothing here invokes the compiler (that is the CrossOver
+# runner in validate_generated_headers.py).
+# --------------------------------------------------------------------------------------
+
+# Doc 03 §3.3 design rule: keep >= 50% of data RAM for the application. Configurable.
+DEFAULT_APP_HEADROOM_FRAC = 0.5
+
+
+def _next_lower_tier(tier: str) -> str:
+    """The next tier down the full -> min -> trace -> toggle ladder (02 §6), floored
+    at 'toggle'."""
+    return TIER_ORDER[max(0, TIER_ORDER.index(tier) - 1)]
+
+
+def confirm_tier(
+    decision: TierDecision,
+    caps: DeviceCaps,
+    occ: OccReport,
+    *,
+    fcs: FcsReport | None = None,
+    hw_stack_depth: int | None = None,
+    app_headroom_frac: float = DEFAULT_APP_HEADROOM_FRAC,
+) -> TierDecision:
+    """Confirm or demote the provisional tier against a *measured* CC5X budget.
+
+    The provisional tier (from :func:`select_tier`) is a hypothesis; the measured
+    stub is the proof (02 §6). The ``.occ`` for the stub compiled *at the provisional
+    tier* must fit:
+
+      * **RAM** -- the stub leaves at least ``app_headroom_frac`` of device RAM for
+        the application (03 §3.3 keeps >= 50% for the app);
+      * **flash** -- stub code words fit the device's program memory;
+      * **stack** -- (optional) the monitor call depth fits ``hw_stack_depth``. The
+        hardware stack depth is a per-device fact the caller must supply (from pack
+        metadata / the Microchip MCP); it is never assumed here, so when it is not
+        given the stack check is skipped.
+
+    On success the tier is **confirmed** (``provisional=False``). On failure it is
+    **demoted one step** and stays provisional -- the lower tier's lighter stub has
+    not itself been measured, so the caller regenerates at the new tier and re-runs
+    the gate (02 §6: "downgrades ... and records why").
+    """
+    ram_reserve = int(round(occ.ram_total * app_headroom_frac))
+    ram_budget = occ.ram_total - ram_reserve            # max RAM the stub may use
+    ram_ok = occ.ram_used <= ram_budget
+    flash_ok = occ.code_words <= caps.flash_words
+    pct = int(round(app_headroom_frac * 100))
+
+    # Stack check is opt-in: skipped unless an explicit per-device depth is given
+    # (narrowed here so the call-depth comparison sees two ints, not int|None).
+    stack_ok = True
+    stack_detail: str | None = None
+    if fcs is not None and hw_stack_depth is not None:
+        stack_ok = fcs.max_depth <= hw_stack_depth
+        stack_detail = f"stack {fcs.max_depth}{'<=' if stack_ok else '>'}{hw_stack_depth}"
+
+    if ram_ok and flash_ok and stack_ok:
+        bits = [f"RAM {occ.ram_used}B<={ram_budget}B ({pct}% app reserve)",
+                f"code {occ.code_words}w<={caps.flash_words}w flash"]
+        if stack_detail is not None:
+            bits.append(stack_detail)
+        return TierDecision(tier=decision.tier, provisional=False, forced=decision.forced,
+                            reason="measured: " + ", ".join(bits))
+
+    fails: list[str] = []
+    if not ram_ok:
+        fails.append(f"RAM {occ.ram_used}B>{ram_budget}B ({pct}% app reserve)")
+    if not flash_ok:
+        fails.append(f"code {occ.code_words}w>{caps.flash_words}w flash")
+    if not stack_ok and stack_detail is not None:
+        fails.append(stack_detail)
+    lower = _next_lower_tier(decision.tier)
+    reason = f"measured demote {decision.tier!r}->{lower!r}: " + "; ".join(fails) + \
+             f"; re-measure at {lower!r}"
+    return TierDecision(tier=lower, provisional=True, forced=decision.forced, reason=reason)
+
+
+def symbols_from_var(varsyms: list[VarSymbol]) -> dict:
+    """Build the map's ``symbols`` table from a parsed ``.var``: name -> file-register
+    address (+ bank/size/class), so the PC tool resolves a name to an address for
+    READ_MEM (01 §6, 03 §3.6). Bitfields carry their bit index; multi-byte vars carry
+    their size. Populating from ``.var`` *is* the 02 §6 "symbol exists at the claimed
+    address" check -- the addresses come straight from the compiler, not a guess."""
+    out: dict[str, dict] = {}
+    for s in varsyms:
+        entry: dict[str, object] = {"address": s.address, "bank": s.bank,
+                                    "size": s.size, "class": s.cls}
+        if s.bit is not None:
+            entry["bit"] = s.bit
+        out[s.name] = entry
+    return out
+
+
+def budget_from_occ(occ: OccReport) -> dict:
+    """The map's ``budget`` block, filled from a measured ``.occ`` (02 §6)."""
+    return {
+        "measured": True,
+        "chip": occ.chip,
+        "ram_used": occ.ram_used,
+        "ram_free": occ.ram_free,
+        "ram_total": occ.ram_total,
+        "code_words": occ.code_words,
+        "code_pct": occ.code_pct,
+    }
+
+
+def apply_measurement(
+    map_payload: dict, decision: TierDecision, occ: OccReport, varsyms: list[VarSymbol]
+) -> dict:
+    """Fold measured results into a :func:`build_map` payload (mutated in place and
+    returned): the confirmed/demoted tier fields, the ``symbols`` table (from
+    ``.var``), and the ``budget`` block (from ``.occ``). ``decision`` must be the
+    output of :func:`confirm_tier` (i.e. already confirmed or demoted)."""
+    map_payload["tier"] = decision.tier
+    map_payload["tier_wire"] = TIER_WIRE.get(decision.tier, 0)
+    map_payload["tier_provisional"] = decision.provisional
+    map_payload["tier_forced"] = decision.forced
+    map_payload["tier_reason"] = decision.reason
+    map_payload["symbols"] = symbols_from_var(varsyms)
+    map_payload["budget"] = budget_from_occ(occ)
+    return map_payload
+
+
+# One compiled+parsed measurement of the stub at a given tier: the (.occ, .var, .fcs)
+# reports for that tier's stub. ``fcs`` is None when the call structure was not
+# requested/produced. Returned by a ``MeasureFn`` so the gate can re-measure on demote.
+Measurement = tuple["OccReport", "list[VarSymbol]", "FcsReport | None"]
+# Compile the stub *at this tier* and return its parsed reports. Injected into
+# :func:`run_measure_gate` so the gate loop is pure/testable; the real implementation
+# (CrossOver CC5X compile + measure.parse_*) lives in validate_generated_headers.py.
+MeasureFn = Callable[[str], Measurement]
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """Outcome of the 02 §6 measured-budget gate (see :func:`run_measure_gate`)."""
+
+    decision: TierDecision            # final tier; provisional=False iff measurement-confirmed
+    occ: OccReport                    # the measurement at ``decision.tier`` ...
+    varsyms: list[VarSymbol]          # ... so apply_measurement fills the map from matching data
+    fcs: FcsReport | None
+    history: tuple[str, ...]          # one reason per attempt, oldest first (02 §6 "records why")
+
+    @property
+    def confirmed(self) -> bool:
+        return not self.decision.provisional
+
+
+def run_measure_gate(
+    decision: TierDecision,
+    caps: DeviceCaps,
+    measure: MeasureFn,
+    *,
+    hw_stack_depth: int | None = None,
+    app_headroom_frac: float = DEFAULT_APP_HEADROOM_FRAC,
+) -> GateResult:
+    """Run the 02 §6 acceptance gate: measure the stub at the provisional tier, then
+    confirm it or demote-and-re-measure down the full->min->trace->toggle ladder until
+    a tier's measured budget fits or the 'toggle' floor is reached.
+
+    ``decision`` is the provisional pick from :func:`select_tier`. ``measure(tier)``
+    compiles the stub *regenerated at that tier* and returns its parsed reports; it is
+    called once per tier tried (so a demote re-measures the lighter stub, per
+    :func:`confirm_tier`). The returned :class:`GateResult` carries the measurement that
+    matches the final tier, so the caller can ``apply_measurement`` with consistent data.
+
+    A confirmed result has ``decision.provisional is False``. If even the 'toggle' floor
+    fails to fit, the result stays provisional (``confirmed`` False) with the floor's
+    measurement and reason -- an honest gate failure the caller/CI must surface, not a
+    silent pass. The loop is bounded by the ladder length so a misbehaving ``measure``
+    cannot spin forever.
+    """
+    current = decision
+    history: list[str] = []
+    # At most one attempt per rung of the ladder; the floor (toggle->toggle) also breaks
+    # below, this bound is the belt-and-suspenders backstop.
+    for _ in range(len(TIER_ORDER)):
+        occ, varsyms, fcs = measure(current.tier)
+        result = confirm_tier(
+            current, caps, occ,
+            fcs=fcs, hw_stack_depth=hw_stack_depth, app_headroom_frac=app_headroom_frac,
+        )
+        history.append(result.reason)
+        if not result.provisional:                      # measurement-confirmed
+            return GateResult(result, occ, varsyms, fcs, tuple(history))
+        if result.tier == current.tier:                 # floored at 'toggle', cannot demote
+            return GateResult(result, occ, varsyms, fcs, tuple(history))
+        current = result                                # demoted; re-measure lighter stub
+    # Unreachable in practice (the floor breaks first); return the last state honestly.
+    return GateResult(current, occ, varsyms, fcs, tuple(history))
 
 
 # --------------------------------------------------------------------------------------

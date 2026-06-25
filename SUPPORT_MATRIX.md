@@ -33,6 +33,7 @@ Validated using [validate_generated_headers.py](/home/gary/apps/cc5x_paid/tools/
 | `PIC12F1501` | `12F` | yes | yes | pass |
 | `PIC12F1840` | `12F` | yes | yes | pass |
 | `PIC16F1509` | `16F` | yes | yes | pass |
+| `PIC16F15244` | `16F` | yes | yes | pass |
 | `PIC16F15313` | `16F` | yes | yes | pass |
 | `PIC16F1789` | `16F` | yes | yes | pass |
 | `PIC16F18325` | `16F` | yes | yes | pass |
@@ -57,6 +58,7 @@ The installed local `.atpack` files currently expose a broad `10F`/`12F`/`16F` p
   - `PIC12F1501`
   - `PIC12F1840`
   - `PIC16F1509`
+  - `PIC16F15244`
   - `PIC16F15313`
   - `PIC16F1789`
   - `PIC16F18446`
@@ -103,7 +105,7 @@ This means the validated family coverage now spans:
 The current implementation is strong enough to claim:
 
 - pack-native config workflows for locally available `10F`/`12F`/`16F` devices
-- real-compiler-validated generated headers for the twelve devices listed above
+- real-compiler-validated generated headers for the thirteen devices listed above
 - CrossOver-backed validation workflow repeatability
 - a first-pass open project workflow via `setcc-native.json`, including manifest init, validation, config sync, and manifest-driven builds
 

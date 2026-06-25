@@ -1251,6 +1251,24 @@ class GenerateVscodeTasksTests(unittest.TestCase):
 
 
 class ValidateGeneratedHeadersTests(unittest.TestCase):
+    def test_measurement_harness_includes_device_header_and_stub(self) -> None:
+        h = validate_headers._measurement_harness(
+            "16F1509.H", "cdl_monitor_16F1509.c",
+            "void cdl_init(void);\nvoid cdl_trace(uns8 ch, uns16 v);\nvoid cdl_poll(void);\n")
+        self.assertIn('#include "16F1509.H"', h)
+        self.assertIn('#include "cdl_monitor_16F1509.c"', h)
+        self.assertIn("void main(void)", h)
+
+    def test_measurement_harness_only_calls_declared_entry_points(self) -> None:
+        # A trace-tier header declares no cdl_bp -> the harness must not reference it
+        # (an undeclared call would fail to compile), but must call what is declared.
+        stub_h = "void cdl_init(void);\nvoid cdl_trace(uns8 ch, uns16 v);\n"
+        h = validate_headers._measurement_harness("d.H", "stub.c", stub_h)
+        self.assertIn("cdl_init();", h)
+        self.assertIn("cdl_trace(0, 0);", h)
+        self.assertNotIn("cdl_bp(", h)
+        self.assertNotIn("cdl_poll(", h)
+
     def test_compile_result_reports_actual_header_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

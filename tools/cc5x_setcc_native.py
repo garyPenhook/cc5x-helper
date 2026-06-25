@@ -33,6 +33,7 @@ try:
         device_short_name,
     )
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from cc5x_setcc_native_lib.debuggen import generate_debug_stub
     from cc5x_setcc_native_lib.intellisense import (
         DEFAULT_CC5X_VERSION,
         build_intellisense,
@@ -71,6 +72,7 @@ except ModuleNotFoundError:
         device_short_name,
     )
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
+    from tools.cc5x_setcc_native_lib.debuggen import generate_debug_stub
     from tools.cc5x_setcc_native_lib.intellisense import (
         DEFAULT_CC5X_VERSION,
         build_intellisense,
@@ -2298,6 +2300,69 @@ def cmd_intellisense(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_debug_stub(args: argparse.Namespace) -> int:
+    """Generate the CDL debug stub (cdl_monitor_<dev>.{c,h}) + map for a project.
+
+    Device + metadata come from the manifest the same way `build`/`intellisense` resolve
+    them. The optional ``debug`` section is carried on ProjectFile (preserved across
+    load/edit/write), and validated by debuggen; absent, sensible defaults apply (tier
+    auto, software breakpoints, write_mem off).
+    """
+    project_path = Path(args.project)
+    project = load_project_file(project_path)
+    debug_payload = project.debug
+    if args.tier:
+        debug_payload = dict(debug_payload or {})
+        debug_payload["tier"] = args.tier
+    try:
+        _, metadata = project_metadata(project)
+        generated = generate_debug_stub(metadata, debug_payload)
+    except (SystemExit, Exception) as exc:
+        # Extension-facing JSON boundary: an invalid debug config, a missing/malformed pack,
+        # or an unresolvable device becomes the structured {ok:false} contract, not a
+        # traceback. Mirrors cmd_project_generate_header / cmd_intellisense.
+        return _program_error("debug_stub_failed", str(exc), args.json)
+
+    out_dir = project_path_join(project_path, args.out_dir) if args.out_dir else project_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = {}
+    for name, text in (
+        (generated.monitor_h_name, generated.monitor_h),
+        (generated.monitor_c_name, generated.monitor_c),
+        (generated.map_name, generated.map_json),
+    ):
+        target = out_dir / name
+        # Atomic, latin-1 to match the device header (CC5X sources are latin-1); the map is
+        # ASCII JSON so it round-trips through latin-1 unchanged.
+        atomic_write_text(target, text, encoding="latin-1")
+        written[name] = str(target)
+
+    payload = {
+        "ok": True,
+        "device": generated.device,
+        "tier": generated.tier,
+        "tier_provisional": generated.decision.provisional,
+        "tier_reason": generated.decision.reason,
+        "capabilities": generated.capabilities_bits,
+        "ram_bytes": generated.caps.ram_bytes,
+        "flash_words": generated.caps.flash_words,
+        "monitor_h": written[generated.monitor_h_name],
+        "monitor_c": written[generated.monitor_c_name],
+        "map": written[generated.map_name],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"debug stub for {generated.device}: tier {generated.tier} "
+              f"(provisional={str(generated.decision.provisional).lower()})")
+        print(f"  reason:    {generated.decision.reason}")
+        print(f"  monitor.h: {payload['monitor_h']}")
+        print(f"  monitor.c: {payload['monitor_c']}")
+        print(f"  map:       {payload['map']}")
+        print("  NOTE: confirm the tier against a measured CC5X budget (.occ) before relying on it.")
+    return 0
+
+
 def cmd_project_list_editions(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
@@ -2589,6 +2654,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     intellisense.add_argument("--json", action="store_true")
     intellisense.set_defaults(func=json_error_boundary(cmd_intellisense))
+
+    debug_stub = subparsers.add_parser(
+        "debug-stub",
+        parents=[workspace_parent],
+        help="Generate the CDL debug/trace stub (cdl_monitor_<dev>.{c,h}) + map for a project.",
+    )
+    debug_stub.add_argument("--project", default="setcc-native.json")
+    debug_stub.add_argument(
+        "--out-dir",
+        help="Directory to write the stub/map into (default: the manifest's directory).",
+    )
+    debug_stub.add_argument(
+        "--tier",
+        choices=["auto", "full", "min", "trace", "toggle"],
+        help="Override the manifest debug.tier (cannot force higher than the device supports).",
+    )
+    debug_stub.add_argument("--json", action="store_true")
+    # json_error_boundary: a missing/malformed manifest or bad pack metadata is loaded before
+    # the command's own try/except, so wrap it to keep the --json contract.
+    debug_stub.set_defaults(func=json_error_boundary(cmd_debug_stub))
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",

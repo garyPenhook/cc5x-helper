@@ -78,6 +78,31 @@ class ProjectFileTests(unittest.TestCase):
             self.assertEqual(loaded.header_mode, "existing")
             self.assertEqual(loaded.header_path, "include/12F1840.H")
 
+    def test_debug_section_survives_round_trip(self) -> None:
+        # Regression: a hand-added "debug" section must not be erased when a mutation
+        # command rewrites the manifest (load -> to_dict -> write).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "device": "PIC16F15244",
+                        "compiler": "/c/CC5X.EXE",
+                        "header": {"mode": "generated", "path": "h/16F15244.H"},
+                        "config_source": "main.c",
+                        "main_source": "main.c",
+                        "editions": {"debug": {"config": {}, "build_options": []}},
+                        "debug": {"tier": "auto", "transport": {"brg": 25}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_project_file(path)
+            self.assertEqual(loaded.debug, {"tier": "auto", "transport": {"brg": 25}})
+            write_project_file(loaded, path)  # simulate a mutation command's rewrite
+            self.assertEqual(load_project_file(path).debug, loaded.debug)
+
     def test_validate_project_file_rejects_non_cc5x_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "setcc-native.json"

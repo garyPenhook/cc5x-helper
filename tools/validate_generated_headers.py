@@ -15,8 +15,18 @@ from cc5x_setcc_native import (
     atomic_write_text,
     find_device_metadata,
 )
+from cc5x_setcc_native_lib import debuggen, measure
 from cc5x_setcc_native_lib.headergen import render_full_header
 from cc5x_setcc_native_lib.picmeta import load_device_metadata
+from cc5x_setcc_native_lib.project import load_project_file
+
+# Full compile flags for the measure gate: -V emits the variable list (<src>.var) and
+# -Q the call tree (<src>.fcs); the .occ budget file is written by default (CC5X 3.8
+# manual, cc5x_paid/cc5x-38.pdf, options -V/-Q). These flags REPLACE the normal -S
+# (silent): -S together with both -V and -Q is a CC5X bug that aborts with "Error
+# opening file <src>.occ" (verified empirically on CC5X 3.8A); -V -Q alone works.
+# Override with CC5X_REPORT_FLAGS for a different toolchain version.
+CC5X_REPORT_FLAGS = shlex.split(os.environ.get("CC5X_REPORT_FLAGS", "-V -Q"))
 
 
 DEFAULT_DEVICES = [
@@ -111,6 +121,7 @@ def run_compile(
     label: str,
     device: str,
     timeout: float | None,
+    compile_flags: list[str] = ("-S",),
 ) -> CompileResult:
     windows_include = to_windows_path(include_dir)
     windows_source = to_windows_path(source_path)
@@ -119,7 +130,7 @@ def run_compile(
     hex_path = stem.with_suffix(".hex")
     try:
         completed = subprocess.run(
-            [*runner, "-S", f"-I{windows_include}", windows_source],
+            [*runner, *compile_flags, f"-I{windows_include}", windows_source],
             cwd=source_path.parent,
             text=True,
             capture_output=True,
@@ -206,6 +217,117 @@ def validate_device(device: str, runner: list[str], timeout: float | None) -> li
     return results
 
 
+def _metadata_for(device: str):
+    result = find_device_metadata(device, None)
+    return load_device_metadata(
+        device=result["device"],
+        ini_reference=result.get("pack_ini") or result.get("ini"),
+        cfgdata_reference=result.get("pack_cfgdata") or result.get("cfgdata"),
+        pic_reference=result.get("pic"),
+    )
+
+
+# Public entry points a generated stub may expose, with a measurement call for each.
+# Only those actually declared in the stub header are referenced (lower tiers omit
+# some), so the harness compiles at every tier without touching an undefined symbol.
+_STUB_ENTRY_CALLS = {
+    "cdl_init": "cdl_init();",
+    "cdl_trace": "cdl_trace(0, 0);",
+    "cdl_poll": "cdl_poll();",
+    "cdl_bp": "cdl_bp(0);",
+}
+
+
+def _measurement_harness(device_header_name: str, stub_c_name: str, stub_h_text: str) -> str:
+    """A standalone TU that makes the stub fragment measurable: pull in the device header
+    (SFRs + CC5X types), then the stub source, then a main() that calls every public
+    entry point the stub header declares so CC5X keeps (and budgets) all of them."""
+    calls = [call for fn, call in _STUB_ENTRY_CALLS.items() if f"{fn}(" in stub_h_text]
+    body = "\n".join(f"    {c}" for c in calls)
+    return (
+        f'// Generated measurement harness (P2 gate) -- DO NOT EDIT.\n'
+        f'#include "{device_header_name}"\n'
+        f'#include "{stub_c_name}"\n'
+        f'void main(void) {{\n{body}\n}}\n'
+    )
+
+
+def measure_debug_stub(
+    device: str,
+    runner: list[str],
+    timeout: float | None,
+    debug_config: dict,
+    *,
+    report_flags: list[str] = CC5X_REPORT_FLAGS,
+    hw_stack_depth: int | None = None,
+) -> debuggen.GateResult:
+    """Run the 02 §6 measured-budget gate for a device's debug stub end-to-end:
+    pick the provisional tier, then compile-and-measure down the ladder until a tier's
+    real CC5X budget fits (or the floor fails), and write the confirmed stub + map with
+    the measured symbols/budget folded in.
+
+    ``debug_config`` is the project's full ``debug`` section: it must carry everything a
+    monitor-tier stub needs to even *generate* -- most importantly ``transport.brg`` (the
+    Fosc-dependent SPBRG value, which is never guessed). Each tier the gate tries is the
+    base config with only ``tier`` overridden, so a demote re-measures the same project
+    config at a lighter tier. Generating without ``brg`` would raise immediately for any
+    full/min device, so the gate cannot run on a bare ``{"tier": ...}``.
+
+    The compile step is the only part not covered by the unit suite (it needs the real
+    CrossOver CC5X compiler); the tier loop, parsing, and map-fill are all tested in
+    test_measure.py via injected fixtures.
+    """
+    metadata = _metadata_for(device)
+    short = short_device_name(device)
+    build_dir = VALIDATION_ROOT / short / "debug-stub"
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    device_header = generate_device_header(device)
+
+    def gen_for(tier: str) -> debuggen.GeneratedDebug:
+        # Override only the tier; keep brg/channels/pins/breakpoints from the project.
+        return debuggen.generate_debug_stub(metadata, {**debug_config, "tier": tier})
+
+    def measure_at(tier: str) -> debuggen.Measurement:
+        # The stub is a *fragment*: no main, and it relies on the device header for SFRs
+        # and CC5X types. Wrap it in a harness TU (device header + stub + a main that
+        # touches every public entry point so none is dead-stripped) -- this is the
+        # p2stub.c pattern the golden fixtures were produced with.
+        gen = gen_for(tier)
+        short = short_device_name(device)
+        atomic_write_text(build_dir / f"{short}.H", device_header, encoding="latin-1")
+        atomic_write_text(build_dir / gen.monitor_h_name, gen.monitor_h, encoding="latin-1")
+        atomic_write_text(build_dir / gen.monitor_c_name, gen.monitor_c, encoding="latin-1")
+        harness = _measurement_harness(f"{short}.H", gen.monitor_c_name, gen.monitor_h)
+        src = build_dir / "measure_main.c"
+        atomic_write_text(src, harness, encoding="latin-1")
+        res = run_compile(
+            runner=runner, include_dir=build_dir, source_path=src,
+            header_path=build_dir / gen.monitor_h_name, label=f"debug-stub:{tier}",
+            device=device, timeout=timeout, compile_flags=report_flags,
+        )
+        if not res.succeeded:
+            raise RuntimeError(
+                f"{device}: debug-stub compile failed at tier {tier!r} "
+                f"(rc={res.returncode})\n{(res.stderr or res.stdout).strip()}")
+        return measure.read_reports(build_dir, src.stem)
+
+    provisional = gen_for("auto")
+    result = debuggen.run_measure_gate(
+        provisional.decision, provisional.caps, measure_at, hw_stack_depth=hw_stack_depth)
+
+    # Regenerate the stub/map at the final tier and fold in the matching measurement,
+    # so the shipped map carries the confirmed tier + measured symbols/budget (02 §6).
+    final = gen_for(result.decision.tier)
+    map_payload = json.loads(final.map_json)
+    debuggen.apply_measurement(map_payload, result.decision, result.occ, result.varsyms)
+    atomic_write_text(build_dir / final.monitor_h_name, final.monitor_h, encoding="latin-1")
+    atomic_write_text(build_dir / final.monitor_c_name, final.monitor_c, encoding="latin-1")
+    atomic_write_text(build_dir / final.map_name, json.dumps(map_payload, indent=2) + "\n",
+                      encoding="latin-1")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compile generated CC5X headers under CrossOver to validate real compiler acceptance."
@@ -222,7 +344,69 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--debug-stub",
+        action="store_true",
+        help="Run the 02 §6 measured-budget gate on each device's CDL debug stub "
+             "(compile-and-measure, confirm/demote tier, write the measured map) "
+             "instead of validating the plain device header.",
+    )
+    parser.add_argument(
+        "--project",
+        help="Project manifest (setcc-native.json) whose 'debug' section supplies the "
+             "stub config (transport.brg, channels, pins) for --debug-stub. Required "
+             "for monitor tiers, which cannot be generated without a baud divisor.",
+    )
     return parser
+
+
+def _debug_config_from_project(project_path: str | None) -> dict:
+    """Load the manifest 'debug' section for the gate. Raises ValueError (-> clean exit)
+    when there is no usable config, since a monitor-tier stub cannot be generated
+    without one (notably transport.brg)."""
+    if not project_path:
+        raise ValueError("--debug-stub requires --project <manifest> to supply debug.transport.brg")
+    debug = load_project_file(Path(project_path)).debug
+    if not debug:
+        raise ValueError(f"{project_path}: no 'debug' section to drive the measured-budget gate")
+    return debug
+
+
+def _run_debug_stub_gate(devices: list[str], runner: list[str], timeout: float | None,
+                         as_json: bool, project_path: str | None) -> int:
+    try:
+        debug_config = _debug_config_from_project(project_path)
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}) if as_json else f"error: {exc}")
+        return 2
+    payloads = []
+    ok = True
+    for device in devices:
+        try:
+            result = measure_debug_stub(device, runner, timeout, debug_config)
+        except Exception as exc:  # compile failure / ungeneratable tier -> per-device FAIL, not a crash
+            ok = False
+            payloads.append({"device": device, "confirmed": False, "error": str(exc)})
+            continue
+        ok = ok and result.confirmed
+        payloads.append({
+            "device": device,
+            "tier": result.decision.tier,
+            "confirmed": result.confirmed,
+            "reason": result.decision.reason,
+            "history": list(result.history),
+        })
+    if as_json:
+        print(json.dumps(payloads, indent=2))
+    else:
+        for p in payloads:
+            if "error" in p:
+                print(f"FAIL {p['device']}: {p['error']}")
+                continue
+            print(f"{'CONFIRM' if p['confirmed'] else 'FAIL'} {p['device']} -> tier {p['tier']}")
+            for step in p["history"]:
+                print(f"    {step}")
+    return 0 if ok else 1
 
 
 def main() -> int:
@@ -230,6 +414,8 @@ def main() -> int:
     runner = runner_command(args.runner)
     compile_timeout = timeout_seconds(args.timeout_seconds)
     devices = args.devices or DEFAULT_DEVICES
+    if args.debug_stub:
+        return _run_debug_stub_gate(devices, runner, compile_timeout, args.json, args.project)
     results: list[CompileResult] = []
     for device in devices:
         results.extend(validate_device(device, runner, compile_timeout))
