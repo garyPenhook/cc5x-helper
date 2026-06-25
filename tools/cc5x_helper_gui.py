@@ -216,7 +216,8 @@ def help_sections() -> list[tuple[str, str]]:
             "Welcome",
             """
             <h1>cc5x-helper GUI Help</h1>
-            <p>This GUI is a front end for the pack-first CC5X helper workflow. It targets BKND CC5X projects for PIC10F, PIC12F, and PIC16F devices, using modern Microchip device packs where possible.</p>
+            <p>This GUI is a front end for the pack-first CC5X helper workflow. It targets BKND CC5X projects for PIC10F,
+            PIC12F, and PIC16F devices, using modern Microchip device packs where possible.</p>
             <h2>What the app does</h2>
             <ul>
               <li>Checks your environment and installed device packs.</li>
@@ -234,7 +235,9 @@ def help_sections() -> list[tuple[str, str]]:
               <li>Use <b>Dry Run Build</b> first, then <b>Build</b>.</li>
             </ol>
             <h2>Manifest location</h2>
-            <p>The default manifest file is <code>setcc-native.json</code>. The GUI tries to find it in sensible places, including the project root above <code>dist/</code>. You can also force a manifest path with the <code>CC5X_HELPER_PROJECT</code> environment variable.</p>
+            <p>The default manifest file is <code>setcc-native.json</code>. The GUI tries to find it in sensible places,
+            including the project root above <code>dist/</code>. You can also force a manifest path with the
+            <code>CC5X_HELPER_PROJECT</code> environment variable.</p>
             """,
         ),
         (
@@ -277,7 +280,9 @@ def help_sections() -> list[tuple[str, str]]:
               <li>Click <b>Build</b> for a real compile.</li>
             </ol>
             <h2>What success looks like</h2>
-            <p>The output pane should show the exact command, compiler output, and a clean process exit code. Generated artifacts such as <code>.hex</code> and <code>.occ</code> should appear in the project working directory according to the CC5X toolchain behavior.</p>
+            <p>The output pane should show the exact command, compiler output, and a clean process exit code. Generated
+            artifacts such as <code>.hex</code> and <code>.occ</code> should appear in the project working directory according
+            to the CC5X toolchain behavior.</p>
             """,
         ),
         (
@@ -285,17 +290,23 @@ def help_sections() -> list[tuple[str, str]]:
             """
             <h1>Core Concepts</h1>
             <h2>Pack-first metadata</h2>
-            <p>The tool prefers Microchip device packs over old monolithic MPLAB layouts. It normalizes information from <code>.PIC</code>, <code>.ini</code>, and <code>cfgdata</code> into one internal model.</p>
+            <p>The tool prefers Microchip device packs over old monolithic MPLAB layouts. It normalizes information from
+            <code>.PIC</code>, <code>.ini</code>, and <code>cfgdata</code> into one internal model.</p>
             <h2>Manifest-driven workflow</h2>
-            <p>Instead of hiding state in <code>setcc.pxk</code>, the GUI stores repeatable project state in <code>setcc-native.json</code>.</p>
+            <p>Instead of hiding state in <code>setcc.pxk</code>, the GUI stores repeatable project state in
+            <code>setcc-native.json</code>.</p>
             <h2>Editions</h2>
-            <p>An edition is one named build variant of the same project. Editions hold config symbols and build options. They do not replace the top-level project fields such as device, compiler, or main source.</p>
+            <p>An edition is one named build variant of the same project. Editions hold config symbols and build options. They
+            do not replace the top-level project fields such as device, compiler, or main source.</p>
             <h2>Managed config blocks</h2>
-            <p>The tool generates a managed <code>#pragma config</code> block. <b>Render Config</b> previews it. <b>Sync Config</b> writes or updates it in the configured source file.</p>
+            <p>The tool generates a managed <code>#pragma config</code> block. <b>Render Config</b> previews it. <b>Sync
+            Config</b> writes or updates it in the configured source file.</p>
             <h2>Header generation</h2>
-            <p>Headers can be generated from pack metadata, supplied explicitly, or treated as pre-existing files. Generated headers are useful for newer devices that BKND may never have shipped.</p>
+            <p>Headers can be generated from pack metadata, supplied explicitly, or treated as pre-existing files. Generated
+            headers are useful for newer devices that BKND may never have shipped.</p>
             <h2>Runner vs compiler</h2>
-            <p>The compiler is the actual CC5X executable. The runner is optional and wraps the compiler, for example with CrossOver or Wine. If you use a runner, the app constructs the final command line for you.</p>
+            <p>The compiler is the actual CC5X executable. The runner is optional and wraps the compiler, for example with
+            CrossOver or Wine. If you use a runner, the app constructs the final command line for you.</p>
             """,
         ),
         (
@@ -313,7 +324,8 @@ def help_sections() -> list[tuple[str, str]]:
             <ul>
               <li>Pack availability tells you whether the machine has source metadata for supported devices.</li>
               <li>Compiler and runner paths tell you whether the configured CC5X toolchain exists.</li>
-              <li>Validated devices indicate which parts have already passed the real compiler-validation flow in this repo.</li>
+              <li>Validated devices indicate which parts have already passed the real compiler-validation flow in this
+              repo.</li>
             </ul>
             <h2>When to use this tab</h2>
             <ul>
@@ -331,11 +343,13 @@ def help_sections() -> list[tuple[str, str]]:
             <h2>Fields</h2>
             <ul>
               <li><b>Device</b>: the target part, for example <code>PIC16F1509</code>.</li>
-              <li><b>MPLAB Root</b>: optional override for older MPLAB metadata locations. Leave it blank unless you have a specific legacy install to use.</li>
+              <li><b>MPLAB Root</b>: optional override for older MPLAB metadata locations. Leave it blank unless you have a
+              specific legacy install to use.</li>
             </ul>
             <h2>Actions</h2>
             <ul>
-              <li><b>Probe</b>: shows where metadata for the device was found, such as pack files, <code>.PIC</code>, <code>.ini</code>, and <code>cfgdata</code>.</li>
+              <li><b>Probe</b>: shows where metadata for the device was found, such as pack files, <code>.PIC</code>,
+              <code>.ini</code>, and <code>cfgdata</code>.</li>
               <li><b>Describe</b>: shows normalized device metadata parsed from those sources.</li>
               <li><b>List Config</b>: lists available config symbols and their legal values.</li>
               <li><b>Render Header</b>: generates a CC5X-style header from pack metadata.</li>
@@ -357,7 +371,8 @@ def help_sections() -> list[tuple[str, str]]:
             "Projects Overview",
             """
             <h1>Projects Tab</h1>
-            <p>This is the main working area for repeatable builds. It manages a JSON manifest, edition-specific config values, build options, header generation, and actual builds.</p>
+            <p>This is the main working area for repeatable builds. It manages a JSON manifest, edition-specific config values,
+            build options, header generation, and actual builds.</p>
             <h2>Project area</h2>
             <ul>
               <li><b>Project</b>: path to <code>setcc-native.json</code>.</li>
@@ -377,7 +392,8 @@ def help_sections() -> list[tuple[str, str]]:
               <li><b>Config Source</b>: source file that will receive the managed config block.</li>
             </ul>
             <h2>Editions</h2>
-            <p>An edition is a named variant of the same project. Typical examples are <code>production</code>, <code>debug</code>, and <code>qa</code>.</p>
+            <p>An edition is a named variant of the same project. Typical examples are <code>production</code>,
+            <code>debug</code>, and <code>qa</code>.</p>
             <ul>
               <li><b>Add</b>: creates a new edition. If another edition is selected, the new one copies that edition.</li>
               <li><b>Delete</b>: removes the selected edition.</li>
@@ -403,32 +419,43 @@ def help_sections() -> list[tuple[str, str]]:
             """
             <h1>Project Fields Reference</h1>
             <h2>Project</h2>
-            <p>Path to the manifest file. This is where the GUI reads and writes project state. Use one manifest per project root unless you have a strong reason to separate them.</p>
+            <p>Path to the manifest file. This is where the GUI reads and writes project state. Use one manifest per project
+            root unless you have a strong reason to separate them.</p>
             <h2>Device</h2>
-            <p>Target MCU name such as <code>PIC10F320</code>, <code>PIC12F1840</code>, or <code>PIC16F15313</code>. This value drives metadata lookup, config symbol discovery, header generation, and build flags.</p>
+            <p>Target MCU name such as <code>PIC10F320</code>, <code>PIC12F1840</code>, or <code>PIC16F15313</code>. This value
+            drives metadata lookup, config symbol discovery, header generation, and build flags.</p>
             <h2>Compiler</h2>
-            <p>Path to the real CC5X executable. If this is wrong, build commands will fail before meaningful compilation starts.</p>
+            <p>Path to the real CC5X executable. If this is wrong, build commands will fail before meaningful compilation
+            starts.</p>
             <h2>Runner</h2>
-            <p>Optional wrapper command used to launch the compiler. Common examples are CrossOver launchers and Wine. Leave it empty if the compiler is directly runnable.</p>
+            <p>Optional wrapper command used to launch the compiler. Common examples are CrossOver launchers and Wine. Leave it
+            empty if the compiler is directly runnable.</p>
             <h2>MPLAB Root</h2>
-            <p>Optional legacy metadata root. This matters only if you want to force metadata lookup into an old MPLAB layout instead of the modern pack-first search path.</p>
+            <p>Optional legacy metadata root. This matters only if you want to force metadata lookup into an old MPLAB layout
+            instead of the modern pack-first search path.</p>
             <h2>Header Mode</h2>
-            <p>Controls how the project resolves the header used during builds. See the dedicated <b>Header Modes</b> section for behavior and tradeoffs.</p>
+            <p>Controls how the project resolves the header used during builds. See the dedicated <b>Header Modes</b> section
+            for behavior and tradeoffs.</p>
             <h2>Header Path</h2>
-            <p>Path to the header file or target header location. The meaning depends on header mode. In generated mode, this is typically where the generated header will live. In supplied or existing mode, it identifies the header to use.</p>
+            <p>Path to the header file or target header location. The meaning depends on header mode. In generated mode, this
+            is typically where the generated header will live. In supplied or existing mode, it identifies the header to
+            use.</p>
             <h2>Main Source</h2>
             <p>Main C source file passed to the compiler for builds. The GUI does not guess this from the directory.</p>
             <h2>Config Source</h2>
-            <p>Source file that should contain the managed config block. This can be the same file as <b>Main Source</b> or a separate config-focused source file.</p>
+            <p>Source file that should contain the managed config block. This can be the same file as <b>Main Source</b> or a
+            separate config-focused source file.</p>
             <h2>Save Project</h2>
-            <p>Validates and writes these fields to the manifest. If validation fails, the manifest is not silently accepted.</p>
+            <p>Validates and writes these fields to the manifest. If validation fails, the manifest is not silently
+            accepted.</p>
             """,
         ),
         (
             "Editions",
             """
             <h1>Editions Reference</h1>
-            <p>Editions are named build variants under one project. They let you keep one device and one source layout while changing config values or compiler flags.</p>
+            <p>Editions are named build variants under one project. They let you keep one device and one source layout while
+            changing config values or compiler flags.</p>
             <h2>Typical edition names</h2>
             <ul>
               <li><code>production</code></li>
@@ -437,17 +464,21 @@ def help_sections() -> list[tuple[str, str]]:
               <li><code>factory</code></li>
             </ul>
             <h2>Add</h2>
-            <p>Creates a new edition. If another edition is currently selected, the new one copies from that edition. This is useful when creating a close variant instead of starting from empty state.</p>
+            <p>Creates a new edition. If another edition is currently selected, the new one copies from that edition. This is
+            useful when creating a close variant instead of starting from empty state.</p>
             <h2>Delete</h2>
             <p>Removes the selected edition from the manifest. This is a manifest change, not just a UI change.</p>
             <h2>Edition Config</h2>
-            <p>One <code>NAME=VALUE</code> pair per line. Blank lines and comment lines starting with <code>#</code> are ignored. These values override pack defaults when config blocks are rendered or synced.</p>
+            <p>One <code>NAME=VALUE</code> pair per line. Blank lines and comment lines starting with <code>#</code> are
+            ignored. These values override pack defaults when config blocks are rendered or synced.</p>
             <h2>Clear Config</h2>
             <p>Removes all stored config values from the selected edition. It does not remove the edition itself.</p>
             <h2>Edition Build Options</h2>
-            <p>One CC5X option per line. These are appended after the project device and include-path options generated by the tool.</p>
+            <p>One CC5X option per line. These are appended after the project device and include-path options generated by the
+            tool.</p>
             <h2>Selection behavior</h2>
-            <p>Most edition-specific actions require a selected edition. If none is selected, the GUI will stop with a user-facing error dialog instead of running with ambiguous state.</p>
+            <p>Most edition-specific actions require a selected edition. If none is selected, the GUI will stop with a
+            user-facing error dialog instead of running with ambiguous state.</p>
             """,
         ),
         (
@@ -455,7 +486,8 @@ def help_sections() -> list[tuple[str, str]]:
             """
             <h1>Header Modes</h1>
             <ul>
-              <li><b>generated</b>: preferred for pack-first workflows. The tool generates the header from Microchip pack metadata.</li>
+              <li><b>generated</b>: preferred for pack-first workflows. The tool generates the header from Microchip pack
+              metadata.</li>
               <li><b>supplied</b>: use a specific header file path supplied by the project manifest.</li>
               <li><b>existing</b>: use an already-existing header path directly, without generation.</li>
             </ul>
@@ -483,7 +515,8 @@ def help_sections() -> list[tuple[str, str]]:
             "Config Workflow",
             """
             <h1>Managed Config Workflow</h1>
-            <p>cc5x-helper treats configuration as generated content derived from device metadata and edition-level overrides.</p>
+            <p>cc5x-helper treats configuration as generated content derived from device metadata and edition-level
+            overrides.</p>
             <h2>Recommended flow</h2>
             <ol>
               <li>Use the <b>Devices</b> tab to inspect available config symbols.</li>
@@ -582,17 +615,20 @@ def help_sections() -> list[tuple[str, str]]:
             <ul>
               <li>If a desktop environment injects a bad Qt platform theme, force <code>QT_QPA_PLATFORM=xcb</code>.</li>
               <li>The GUI defaults to safer Linux Qt settings when possible.</li>
-              <li>Launching from <code>dist/</code> no longer forces the manifest into <code>dist/setcc-native.json</code>.</li>
+              <li>Launching from <code>dist/</code> no longer forces the manifest into
+              <code>dist/setcc-native.json</code>.</li>
             </ul>
             <h2>Binary size</h2>
-            <p>The GUI executable is large because it bundles a Qt runtime. That is normal for the current packaging approach.</p>
+            <p>The GUI executable is large because it bundles a Qt runtime. That is normal for the current packaging
+            approach.</p>
             """,
         ),
         (
             "CLI Relationship",
             """
             <h1>CLI Relationship</h1>
-            <p>The GUI is not a separate implementation. It is a front end over the same helper library and CLI-oriented workflow.</p>
+            <p>The GUI is not a separate implementation. It is a front end over the same helper library and CLI-oriented
+            workflow.</p>
             <h2>Why this matters</h2>
             <ul>
               <li>Results in the GUI should match the underlying CLI behavior for the same manifest and options.</li>
@@ -613,25 +649,36 @@ def help_sections() -> list[tuple[str, str]]:
             <h1>Troubleshooting</h1>
             <h2>Common issues</h2>
             <ul>
-              <li><b>project file not found</b>: use <b>New</b> to create a manifest or <b>Browse</b> to select an existing one.</li>
+              <li><b>project file not found</b>: use <b>New</b> to create a manifest or <b>Browse</b> to select an existing
+              one.</li>
               <li><b>no edition selected</b>: create an edition and select it before edition-specific actions.</li>
-              <li><b>device metadata not found</b>: verify the device exists in installed packs, then run <b>Doctor</b> and <b>Probe</b>.</li>
-              <li><b>build fails immediately</b>: check the compiler path, runner path, and build command via <b>Dry Run Build</b>.</li>
-              <li><b>packaged GUI launched from dist</b>: the GUI now prefers the project root above <code>dist/</code>, but you can also set <code>CC5X_HELPER_PROJECT</code> explicitly.</li>
+              <li><b>device metadata not found</b>: verify the device exists in installed packs, then run <b>Doctor</b> and
+              <b>Probe</b>.</li>
+              <li><b>build fails immediately</b>: check the compiler path, runner path, and build command via <b>Dry Run
+              Build</b>.</li>
+              <li><b>packaged GUI launched from dist</b>: the GUI now prefers the project root above <code>dist/</code>, but
+              you can also set <code>CC5X_HELPER_PROJECT</code> explicitly.</li>
             </ul>
             <h2>Troubleshooting matrix</h2>
             <table border="1" cellspacing="0" cellpadding="6">
               <tr><th>Symptom</th><th>Likely cause</th><th>What to do</th></tr>
-              <tr><td>Probe fails</td><td>Device not present in installed packs or spelling mismatch</td><td>Use <b>Environment -> List Devices</b> and re-check the part name.</td></tr>
-              <tr><td>Build command looks wrong</td><td>Project fields or runner are misconfigured</td><td>Use <b>Dry Run Build</b> and fix the manifest fields.</td></tr>
-              <tr><td>Config output is incomplete</td><td>Wrong edition selected or no stored overrides</td><td>Use <b>Show Edition</b> and <b>Render Config</b> before syncing.</td></tr>
-              <tr><td>Header generation fails</td><td>Metadata lookup failed or header path is invalid</td><td>Probe the device first and confirm the header mode and path.</td></tr>
-              <tr><td>GUI shows a dialog but no output</td><td>User-facing validation error stopped the action</td><td>Read the dialog text first. The app is blocking a risky or ambiguous action.</td></tr>
+              <tr><td>Probe fails</td><td>Device not present in installed packs or spelling mismatch</td><td>Use <b>Environment
+              -> List Devices</b> and re-check the part name.</td></tr>
+              <tr><td>Build command looks wrong</td><td>Project fields or runner are misconfigured</td><td>Use <b>Dry Run
+              Build</b> and fix the manifest fields.</td></tr>
+              <tr><td>Config output is incomplete</td><td>Wrong edition selected or no stored overrides</td><td>Use <b>Show
+              Edition</b> and <b>Render Config</b> before syncing.</td></tr>
+              <tr><td>Header generation fails</td><td>Metadata lookup failed or header path is invalid</td><td>Probe the device
+              first and confirm the header mode and path.</td></tr>
+              <tr><td>GUI shows a dialog but no output</td><td>User-facing validation error stopped the action</td><td>Read the
+              dialog text first. The app is blocking a risky or ambiguous action.</td></tr>
             </table>
             <h2>Error handling</h2>
-            <p>The GUI wraps button actions and application-level exceptions. Normal user errors should appear as dialogs instead of crashing the process.</p>
+            <p>The GUI wraps button actions and application-level exceptions. Normal user errors should appear as dialogs
+            instead of crashing the process.</p>
             <h2>When to inspect raw output</h2>
-            <p>Use the output pane whenever a command succeeds but the result is not what you expected. The app shows raw JSON, header text, config blocks, and compiler output there.</p>
+            <p>Use the output pane whenever a command succeeds but the result is not what you expected. The app shows raw JSON,
+            header text, config blocks, and compiler output there.</p>
             """,
         ),
     ]
