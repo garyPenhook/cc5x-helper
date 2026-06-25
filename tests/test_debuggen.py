@@ -315,8 +315,27 @@ class StubEmissionTests(unittest.TestCase):
     def test_command_length_guards_emitted(self):
         # READ_MEM/SET_BP/etc must NAK BAD_LEN on a too-short frame, not read stale bytes.
         c = self._gen().monitor_c
-        self.assertIn("if (len < 3) { cdl_ack(CDL_T_NAK, seq, CDL_NAK_BAD_LEN); return; }", c)
+        self.assertIn("if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)
         self.assertIn("CDL_NAK_BAD_LEN", c)
+
+    def test_ack_payload_is_ref_seq_only(self):
+        # ACK ARG is ref_seq only (cdl_proto ACK); NAK carries ref_seq + code.
+        # A 2-byte ACK is rejected by the reference decoder (trailing byte).
+        c = self._gen().monitor_c
+        self.assertIn("static void cdl_ack(uns8 refseq) {", c)
+        self.assertIn("cdl_send(CDL_T_ACK, a, 1);", c)
+        self.assertIn("static void cdl_nak(uns8 refseq, uns8 code) {", c)
+        self.assertIn("cdl_send(CDL_T_NAK, a, 2);", c)
+        self.assertIn("cdl_ack(seq);", c)              # PING / SET_BP / CONTINUE
+
+    def test_cren_enabled_when_rx_advertised_without_rx_pin(self):
+        # A full-tier stub advertises CAP_RX_COMMANDS and emits a real cdl_poll()
+        # whenever the receive path exists, even with no explicit rx_pin. CREN must
+        # follow that (RCSTA = SPEN|CREN), else inbound commands never arrive.
+        c = self._gen({"tier": "full", "transport": {"tx_pin": "RB7", "brg": 25},
+                       "channels": [{"name": "state"}]}).monitor_c
+        self.assertIn("RC1STA = 0x90;", c)             # SPEN(0x80) | CREN(0x10)
+        self.assertIn("while (PIR1 & 0x20) cdl_rx_byte(RC1REG);", c)  # real poll, not stub
 
     def test_device_id_in_header(self):
         h = self._gen().monitor_h

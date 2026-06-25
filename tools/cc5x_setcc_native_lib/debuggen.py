@@ -243,6 +243,17 @@ class EusartRegs:
     rcif_reg: str | None
     rcif_bit: int | None
 
+    @property
+    def has_rx(self) -> bool:
+        """True when the metadata exposes a usable receive path (data reg + RCIF
+        flag). Gates both the CREN receiver-enable in cdl_init and the cdl_poll/
+        dispatch emission, so the two never disagree."""
+        return (
+            self.rx_data is not None
+            and self.rcif_reg is not None
+            and self.rcif_bit is not None
+        )
+
 
 @dataclass(frozen=True)
 class DeviceCaps:
@@ -755,7 +766,13 @@ def _render_source(
         txsta_val |= 1 << eu.brgh_bit
     init.append(f"    {eu.txsta} = 0x{txsta_val:02X};  // async (SYNC=0), TX enabled")
     rcsta_val = 1 << eu.spen_bit
-    if config.rx_pin and eu.cren_bit is not None:
+    # Continuous Receive Enable (async reception setup step 7, EUSART datasheet):
+    # the receiver only runs with CREN=1. Gate it on the receive path itself, not
+    # on rx_pin -- a full-tier stub advertises CAP_RX_COMMANDS and emits cdl_poll()
+    # whenever has_rx holds, even with no explicit rx_pin (PPS routing is the app's
+    # job, see note above), so CREN must follow has_rx or inbound commands never
+    # reach the dispatcher.
+    if eu.has_rx and eu.cren_bit is not None:
         rcsta_val |= 1 << eu.cren_bit
     init.append(f"    {eu.rcsta} = 0x{rcsta_val:02X};  // serial port enabled")
     init.append("    cdl_hello();")
@@ -769,7 +786,7 @@ def _render_source(
 
 def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
     """Tier A receive + command dispatch (PING/READ_MEM/SET_BP/CLR_BP/CONTINUE)."""
-    have_rx = eu.rcif_reg is not None and eu.rcif_bit is not None and eu.rx_data is not None
+    have_rx = eu.has_rx
     sw_bp = config.breakpoints == "software"
     lines: list[str] = [
         "#define CDL_RX_MAX 16",
@@ -794,11 +811,17 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
             "",
         ]
     lines += [
-        "static void cdl_ack(uns8 type, uns8 refseq, uns8 code) {",
+        "static void cdl_ack(uns8 refseq) {",
+        "    uns8 a[1];",
+        "    a[0] = refseq;",            # ACK ARG = ref_seq only (cdl_proto ACK)
+        "    cdl_send(CDL_T_ACK, a, 1);",
+        "}",
+        "",
+        "static void cdl_nak(uns8 refseq, uns8 code) {",
         "    uns8 a[2];",
         "    a[0] = refseq;",
-        "    a[1] = code;",
-        "    cdl_send(type, a, 2);",
+        "    a[1] = code;",              # NAK ARG = ref_seq + code (cdl_proto NAK)
+        "    cdl_send(CDL_T_NAK, a, 2);",
         "}",
         "",
         "static void cdl_read_mem(uns8 lo, uns8 hi, uns8 n) {",
@@ -830,29 +853,29 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs) -> list[str]:
         "    for (i = 0; i < len; i++) crc = cdl_crc8(crc, cdl_rx[3 + i]);",
         "    if (crc != cdl_rx[3 + len]) return; // bad CRC -> drop",
         "    if (type == CDL_T_PING) {",
-        "        cdl_ack(CDL_T_ACK, seq, 0);",
+        "        cdl_ack(seq);",
         "    } else if (type == CDL_T_READ_MEM) {",
-        "        if (len < 3) { cdl_ack(CDL_T_NAK, seq, CDL_NAK_BAD_LEN); return; }",
+        "        if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
         "        cdl_read_mem(cdl_rx[3], cdl_rx[4], cdl_rx[5]);",
     ]
     if sw_bp:
         lines += [
             "    } else if (type == CDL_T_SET_BP) {",
-            "        if (len < 1) { cdl_ack(CDL_T_NAK, seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
             f"        if (cdl_rx[3] < {MAX_BP}) cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);",
-            "        cdl_ack(CDL_T_ACK, seq, 0);",
+            "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CLR_BP) {",
-            "        if (len < 1) { cdl_ack(CDL_T_NAK, seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
             f"        if (cdl_rx[3] < {MAX_BP}) cdl_bp_mask &= (cdl_bitmask(cdl_rx[3]) ^ 0xFF);",
-            "        cdl_ack(CDL_T_ACK, seq, 0);",
+            "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CONTINUE) {",
-            "        if (len < 1) { cdl_ack(CDL_T_NAK, seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
             "        cdl_cont_id = cdl_rx[3];",
-            "        cdl_ack(CDL_T_ACK, seq, 0);",
+            "        cdl_ack(seq);",
         ]
     lines += [
         "    } else {",
-        "        cdl_ack(CDL_T_NAK, seq, CDL_NAK_UNKNOWN_TYPE);",
+        "        cdl_nak(seq, CDL_NAK_UNKNOWN_TYPE);",
         "    }",
         "}",
         "",
