@@ -235,6 +235,10 @@ _STUB_ENTRY_CALLS = {
     "cdl_trace": "cdl_trace(0, 0);",
     "cdl_poll": "cdl_poll();",
     "cdl_bp": "cdl_bp(0);",
+    # Toggle-tier marker: without a call, CC5X can dead-strip the pulse code and the
+    # .occ would under-measure the toggle stub. Only emitted when the header declares
+    # it (full/min stubs do not), so adding it is safe for every tier.
+    "cdl_mark": "cdl_mark(0);",
 }
 
 
@@ -312,7 +316,12 @@ def measure_debug_stub(
                 f"(rc={res.returncode})\n{(res.stderr or res.stdout).strip()}")
         return measure.read_reports(build_dir, src.stem)
 
-    provisional = gen_for("auto")
+    # Honor a manifest-forced tier as the provisional: hardcoding "auto" here would
+    # re-auto-select and measure/emit the higher auto tier even when the project
+    # intentionally forced trace/toggle. gen_for already pins {**debug_config, tier},
+    # so pass the configured tier (default "auto" when unset). The gate is force-down
+    # only, so a forced tier is still demoted if its measured budget overruns.
+    provisional = gen_for(debug_config.get("tier") or "auto")
     result = debuggen.run_measure_gate(
         provisional.decision, provisional.caps, measure_at, hw_stack_depth=hw_stack_depth)
 
