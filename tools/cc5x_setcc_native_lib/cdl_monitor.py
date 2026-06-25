@@ -206,26 +206,38 @@ class Monitor:
         return frame
 
     def _augment_trace(self, frame: dict) -> None:
-        args = frame.get("args", b"")
+        # The value is exactly the bytes left after ch (and the optional tick) -- LEN
+        # delimits them -- so decode by what is on the wire, not the map's channel
+        # width. The v0.1 stub hardcodes `cdl_trace(uns8 ch, uns16 value)` and always
+        # emits a 2-byte value (debuggen.py cdl_trace), while a channel's map width
+        # defaults to 1; trusting the map width would mis-decode every real frame.
+        # Reading the wire bytes also matches the design's VarVal(1,4) (01 SS 4) and
+        # still decodes a TRACE whose channel is absent from the map (just unnamed).
+        args = bytes(frame.get("args", b""))
         if not args:
             frame["decode_error"] = "TRACE has no channel byte"
             return
         ch_id = args[0]
+        frame["ch"] = ch_id
+        off = 1
+        if self.map is not None and self.map.target_tick:
+            if len(args) < off + 2:
+                frame["decode_error"] = "TRACE too short for the advertised target tick"
+                return
+            frame["tick"] = int.from_bytes(args[off:off + 2], "little")
+            off += 2
+        value_bytes = args[off:]
+        if not 1 <= len(value_bytes) <= 4:
+            frame["decode_error"] = f"TRACE value width {len(value_bytes)} outside 1..4"
+            return
+        frame["value"] = int.from_bytes(value_bytes, "little")
         chan = self.map.channels.get(ch_id) if self.map else None
-        if chan is None:
-            frame["ch"] = ch_id
-            frame["decode_error"] = f"channel {ch_id} not in map (value width unknown)"
-            return
-        tick_present = self.map.target_tick if self.map else False
-        try:
-            decoded = cdl_codec.decode_args(
-                "TRACE", bytes(args), bind={"tick": tick_present, "value": chan.width})
-        except ValueError as exc:
-            frame["ch"] = ch_id
-            frame["decode_error"] = str(exc)
-            return
-        frame.update(decoded)
-        frame["ch_name"] = chan.name
+        if chan is not None:
+            frame["ch_name"] = chan.name
+            if chan.width != len(value_bytes):
+                # The map advertises a per-channel width the stub did not honor;
+                # decode by the wire and surface the mismatch rather than failing.
+                frame["width_note"] = f"map width {chan.width} != wire {len(value_bytes)}"
 
     # -- rendering ---------------------------------------------------------------
 

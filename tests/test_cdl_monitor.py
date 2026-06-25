@@ -125,19 +125,37 @@ class MapApplication(unittest.TestCase):
         self.assertEqual(ev.fields["tick"], 0x0102)
         self.assertIn("tick=", ev.text)
 
-    def test_trace_unknown_channel_is_flagged_not_fatal(self):
+    def test_trace_unknown_channel_still_decodes_value_unnamed(self):
+        # Value is read from the wire, so an absent channel decodes fine (no name).
         m = mon.Monitor(make_map())
-        inner = codec.encode("TRACE", 1, bind={"value": 1}, ch=9, value=0x01)
+        inner = codec.encode("TRACE", 1, bind={"value": 2}, ch=9, value=0x0042)
         ev = list(m.feed(relay(0, 1, inner)))[0]
         self.assertEqual(ev.kind, "trace")
-        self.assertIn("not in map", ev.text)
+        self.assertEqual(ev.fields["value"], 0x0042)
+        self.assertNotIn("ch_name", ev.fields)
+        self.assertIn("ch9", ev.text)
 
-    def test_no_map_renders_trace_raw(self):
+    def test_no_map_decodes_value_by_wire_bytes(self):
         m = mon.Monitor(None)
         inner = codec.encode("TRACE", 1, bind={"value": 2}, ch=0, value=0x1234)
         ev = list(m.feed(relay(0, 1, inner)))[0]
         self.assertEqual(ev.kind, "trace")
-        self.assertIn("undecoded", ev.text)
+        self.assertEqual(ev.fields["value"], 0x1234)
+
+    def test_stub_uns16_value_with_default_map_width_1(self):
+        # Regression (Codex P1): the v0.1 stub always emits a 2-byte value, while a
+        # channel's map width defaults to 1. The monitor must decode by the wire
+        # bytes (value 0x1234), not the map width, and note the discrepancy -- not
+        # report every real trace frame as undecoded.
+        m = mon.Monitor(make_map(channels=[{"name": "state", "id": 0, "width": 1}]))
+        inner = codec.encode("TRACE", 1, bind={"value": 2}, ch=0, value=0x1234)
+        ev = list(m.feed(relay(0, 5, inner)))[0]
+        self.assertEqual(ev.kind, "trace")
+        self.assertEqual(ev.fields["value"], 0x1234)
+        self.assertEqual(ev.fields["ch_name"], "state")
+        self.assertIn("width_note", ev.fields)
+        self.assertNotIn("decode_error", ev.fields)
+        self.assertIn("state = 0x1234", ev.text)
 
 
 class Recovery(unittest.TestCase):
