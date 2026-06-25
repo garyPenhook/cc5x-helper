@@ -148,6 +148,10 @@ class Monitor:
         self.map = mmap
         self._outer = cdl_codec.Deframer()
         self._inner = cdl_codec.Deframer()
+        # Without a map, TRACE tick-presence is learned from HELLO.caps (the build
+        # advertises CAP_TARGET_TICK there) so a ticked frame isn't mis-read as a
+        # wider value. False until a HELLO is seen.
+        self._tick_from_hello = False
 
     def feed(self, chunk: bytes) -> Iterator[Event]:
         for frame in self._outer.feed(chunk):
@@ -197,6 +201,10 @@ class Monitor:
         """Resolve the messages cdl_codec leaves raw because their ARG layout is
         per-build (TRACE width/tick, BP_HIT/NAK optionals -- 05 SS 9 / 01 SS 4)."""
         name = frame.get("name")
+        if name == "HELLO":
+            caps = frame.get("caps")
+            if isinstance(caps, int):
+                self._tick_from_hello = bool(caps & proto.CAP_TARGET_TICK)
         if name == "TRACE" and "value" not in frame:
             self._augment_trace(frame)
         elif name == "BP_HIT" and "bp_id" not in frame:
@@ -220,7 +228,10 @@ class Monitor:
         ch_id = args[0]
         frame["ch"] = ch_id
         off = 1
-        if self.map is not None and self.map.target_tick:
+        # Tick presence: the map is authoritative; without one, fall back to what the
+        # last HELLO advertised (CAP_TARGET_TICK) so a ticked frame isn't misread.
+        tick_present = self.map.target_tick if self.map is not None else self._tick_from_hello
+        if tick_present:
             if len(args) < off + 2:
                 frame["decode_error"] = "TRACE too short for the advertised target tick"
                 return

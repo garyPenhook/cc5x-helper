@@ -487,29 +487,42 @@ class BrgResolution:
     source_url: str | None
 
 
-def resolve_brg(config: DebugConfig) -> BrgResolution | None:
+def resolve_brg(config: DebugConfig, *, brgh_available: bool = True) -> BrgResolution | None:
     """Resolve the SPBRG/BRGH the stub should use, or None if the manifest gives no
     baud information. A manual ``transport.brg`` wins (override, byte-for-byte the
     old behavior); otherwise ``transport.fosc`` + ``transport.baud`` drive the
     EUSART BRG formula (brg.py, datasheet-sourced). Raises ValueError when a
-    requested Fosc/baud cannot be hit within tolerance by the 8-bit BRG."""
+    requested Fosc/baud cannot be hit within tolerance by the 8-bit BRG.
+
+    ``brgh_available`` is whether the device exposes a BRGH bit; when False the
+    computation is restricted to BRGH=0 (÷64), so a BRGH=1 divisor is never emitted
+    as a bit the stub cannot set (which would silently run at the wrong baud)."""
     if config.brg is not None:
         return BrgResolution(spbrg=config.brg & 0xFF, brgh=config.brgh, brg16=False,
                              computed=False, fosc=config.fosc, baud=config.baud,
                              actual_baud=None, error_pct=None,
                              source="manual transport.brg override", source_url=None)
     if config.fosc is not None and config.baud is not None:
-        sol = brgmod.compute_brg(config.fosc, config.baud)
+        sol = brgmod.compute_brg(config.fosc, config.baud, allow_brgh=brgh_available)
         if abs(sol.error_frac) > MAX_BAUD_ERROR_FRAC:
+            hint = ("choose a UART-friendly Fosc or set transport.brg manually"
+                    if brgh_available else
+                    "this device exposes no BRGH bit (÷16 unavailable); pick a Fosc that "
+                    "hits the baud in ÷64 mode or set transport.brg manually")
             raise ValueError(
                 f"computed baud error {sol.error_pct:.2f}% for Fosc={config.fosc} Hz / "
                 f"baud={config.baud} exceeds {MAX_BAUD_ERROR_FRAC * 100:.1f}% on the 8-bit "
-                f"BRG; choose a UART-friendly Fosc or set transport.brg manually")
+                f"BRG; {hint}")
         return BrgResolution(spbrg=sol.spbrg, brgh=sol.brgh, brg16=sol.brg16,
                              computed=True, fosc=config.fosc, baud=config.baud,
                              actual_baud=sol.actual_baud, error_pct=round(sol.error_pct, 2),
                              source=brgmod.BRG_SOURCE, source_url=brgmod.BRG_SOURCE_URL)
     return None
+
+
+def _brgh_available(caps: DeviceCaps) -> bool:
+    """Whether the device's EUSART exposes a BRGH field (so the ÷16 mode is usable)."""
+    return caps.eusart is not None and caps.eusart.brgh_bit is not None
 
 
 def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision) -> list[str]:
@@ -540,7 +553,7 @@ def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision
         elif config.rx_pin and caps.eusart.rx_data is None:
             errors.append("rx_pin requested but no EUSART receive register (RCREG) found in metadata")
         try:
-            if resolve_brg(config) is None:
+            if resolve_brg(config, brgh_available=_brgh_available(caps)) is None:
                 errors.append(
                     "tier needs an EUSART baud divisor: set debug.transport.fosc (oscillator "
                     "Hz) + debug.transport.baud so codegen derives SPBRG from the datasheet "
@@ -658,7 +671,7 @@ def build_map(
     # citable datasheet source, or a manual override. Absent if the manifest gives
     # no baud info (e.g. trace/toggle tiers, or a config still to be filled in).
     try:
-        resolved = resolve_brg(config)
+        resolved = resolve_brg(config, brgh_available=_brgh_available(caps))
     except ValueError:
         resolved = None
     if resolved is not None:
@@ -1037,7 +1050,7 @@ def _render_source(
     if eu is None:  # defensive; validate_debug already rejects this for full/min
         raise ValueError(f"tier {tier!r} requires an EUSART that was not detected")
 
-    resolved = resolve_brg(config)
+    resolved = resolve_brg(config, brgh_available=_brgh_available(caps))
     if resolved is not None and resolved.computed:
         # SPBRG derived from Fosc+baud via the datasheet EUSART BRG formula (P3).
         lines += [

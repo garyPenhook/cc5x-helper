@@ -467,6 +467,18 @@ class BaudComputation(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._gen({"fosc": 32_000_000, "baud": 230400})
 
+    def test_no_brgh_bit_rejects_div16_only_rate(self):
+        # 4 MHz/9600 needs BRGH=1 (÷16). A device that exposes a BRGH bit resolves it
+        # (SPBRG 25); one without a BRGH bit must be rejected, not silently emit a
+        # BRGH=1 divisor the stub runs at ÷64 (wrong baud).
+        cfg = debuggen.parse_debug_config(
+            {"tier": "full", "transport": {"fosc": 4_000_000, "baud": 9600}})
+        ok = debuggen.resolve_brg(cfg, brgh_available=True)
+        self.assertTrue(ok.brgh)
+        self.assertEqual(ok.spbrg, 25)
+        with self.assertRaises(ValueError):
+            debuggen.resolve_brg(cfg, brgh_available=False)
+
     def test_validation_mentions_fosc_when_no_baud_info(self):
         meta = make_metadata()
         cfg = debuggen.parse_debug_config({"tier": "full", "transport": {"tx_pin": "RB7"}})

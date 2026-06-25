@@ -59,19 +59,24 @@ class BrgSolution:
         return self.error_frac * 100.0
 
 
-def compute_brg(fosc_hz: int, baud: int) -> BrgSolution:
+def compute_brg(fosc_hz: int, baud: int, *, allow_brgh: bool = True) -> BrgSolution:
     """Best 8-bit EUSART SPBRG for ``fosc_hz``/``baud`` (BRG16=0), per the formula
     above. Tries BRGH=0 (÷64) and BRGH=1 (÷16) and returns the one with the
     smallest |error|. Raises ValueError if neither yields an in-range divisor
     (n must be 0..255): too-slow baud at a high Fosc needs the 16-bit BRG (not yet
-    emitted) or a manually supplied ``transport.brg``."""
+    emitted) or a manually supplied ``transport.brg``.
+
+    ``allow_brgh=False`` restricts the search to the ÷64 (BRGH=0) mode, for devices
+    whose metadata exposes no BRGH field: a BRGH=1 solution would otherwise be
+    emitted as a bit the stub cannot set, silently running at ÷64 (wrong baud)."""
     if fosc_hz <= 0:
         raise ValueError(f"Fosc must be positive, got {fosc_hz}")
     if baud <= 0:
         raise ValueError(f"baud must be positive, got {baud}")
 
+    modes = _ASYNC_8BIT if allow_brgh else tuple(m for m in _ASYNC_8BIT if not m[0])
     best: BrgSolution | None = None
-    for brgh, mult in _ASYNC_8BIT:
+    for brgh, mult in modes:
         # n that brings Fosc/(M*(n+1)) closest to baud, rounded to the nearest int.
         n = round(fosc_hz / (mult * baud)) - 1
         if not 0 <= n <= SPBRG_8BIT_MAX:
