@@ -34,6 +34,7 @@ try:
     )
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
     from cc5x_setcc_native_lib.debuggen import generate_debug_stub
+    from cc5x_setcc_native_lib.cdl_monitor import Event, Monitor, MonitorMap
     from cc5x_setcc_native_lib.intellisense import (
         DEFAULT_CC5X_VERSION,
         build_intellisense,
@@ -73,6 +74,7 @@ except ModuleNotFoundError:
     )
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
     from tools.cc5x_setcc_native_lib.debuggen import generate_debug_stub
+    from tools.cc5x_setcc_native_lib.cdl_monitor import Event, Monitor, MonitorMap
     from tools.cc5x_setcc_native_lib.intellisense import (
         DEFAULT_CC5X_VERSION,
         build_intellisense,
@@ -2363,6 +2365,95 @@ def cmd_debug_stub(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bytes_from_hex(raw: bytes) -> bytes:
+    """Decode a hex-text capture (whitespace/newlines ignored) into bytes. Lets a
+    capture be stored as ``7e f0 00 ...`` text, e.g. piped from a logic-analyzer
+    export or hand-written in a test."""
+    text = raw.decode("ascii", "strict")
+    compact = "".join(text.split())
+    return bytes.fromhex(compact)
+
+
+def _emit_event(event: "Event", as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(event.as_dict()))
+    else:
+        print(event.text)
+
+
+def _debug_monitor_serial(args: argparse.Namespace, monitor: "Monitor") -> int:
+    """Live capture from a serial port. pyserial is an optional dependency, so a
+    missing module is a clean error, not an import crash -- the canned-capture path
+    (--input) never imports it."""
+    try:
+        import serial  # type: ignore  # pyserial, optional (gui/serial extra)
+    except ImportError:
+        return _program_error(
+            "pyserial_missing",
+            "live --port capture needs pyserial (pip install pyserial); "
+            "decode a saved capture with --input instead",
+            args.json,
+        )
+    try:
+        port = serial.Serial(args.port, args.baud, timeout=0.2)
+    except (OSError, ValueError) as exc:
+        return _program_error("serial_open_failed", str(exc), args.json)
+    if not args.json:
+        print(f"# listening on {args.port} @ {args.baud} baud (Ctrl-C to stop)", file=sys.stderr)
+    try:
+        while True:
+            chunk = port.read(4096)
+            if chunk:
+                for event in monitor.feed(chunk):
+                    _emit_event(event, args.json)
+                    sys.stdout.flush()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        port.close()
+
+
+def cmd_debug_monitor(args: argparse.Namespace) -> int:
+    """Decode a CDL capture and render named, timestamped trace (master-plan P4).
+
+    Two-layer decode (probe RELAY/STATUS envelopes wrapping the target stream) lives
+    in cdl_monitor; this command is just the I/O shell: load the optional map, pick a
+    byte source (--input file, stdin, or live --port), and print each event as text or
+    JSONL. Decoding a saved capture needs no hardware -- that is the CI acceptance path.
+    """
+    mmap = None
+    if args.map:
+        try:
+            mmap = MonitorMap.from_file(args.map)
+        except (OSError, ValueError) as exc:
+            return _program_error("map_load_failed", str(exc), args.json)
+    monitor = Monitor(mmap)
+
+    if args.port:
+        return _debug_monitor_serial(args, monitor)
+
+    if args.input:
+        try:
+            raw = Path(args.input).read_bytes()
+        except OSError as exc:
+            return _program_error("input_read_failed", str(exc), args.json)
+    else:
+        raw = sys.stdin.buffer.read()
+    if args.hex:
+        try:
+            raw = _bytes_from_hex(raw)
+        except (UnicodeDecodeError, ValueError) as exc:
+            return _program_error("hex_decode_failed", str(exc), args.json)
+
+    count = 0
+    for event in monitor.feed(raw):
+        _emit_event(event, args.json)
+        count += 1
+    if not args.json:
+        print(f"# {count} event(s) decoded", file=sys.stderr)
+    return 0
+
+
 def cmd_project_list_editions(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     project = load_project_file(project_path)
@@ -2674,6 +2765,40 @@ def build_parser() -> argparse.ArgumentParser:
     # json_error_boundary: a missing/malformed manifest or bad pack metadata is loaded before
     # the command's own try/except, so wrap it to keep the --json contract.
     debug_stub.set_defaults(func=json_error_boundary(cmd_debug_stub))
+
+    debug_monitor = subparsers.add_parser(
+        "debug-monitor",
+        help="Decode a CDL capture and render named, timestamped trace (P4).",
+    )
+    debug_monitor.add_argument(
+        "--map",
+        help="cdl_map_<dev>.json (from debug-stub) for named channels + symbols. "
+        "Optional: without it, frames render by type with no names.",
+    )
+    debug_monitor.add_argument(
+        "--input",
+        help="Capture file to decode (raw bytes, or hex text with --hex). "
+        "Default: read stdin.",
+    )
+    debug_monitor.add_argument(
+        "--hex", action="store_true",
+        help="Treat the --input/stdin capture as hex text (whitespace ignored).",
+    )
+    debug_monitor.add_argument(
+        "--port",
+        help="Serial port for a live capture instead of a file (needs pyserial).",
+    )
+    debug_monitor.add_argument(
+        "--baud", type=int, default=460800,
+        help="Baud for --port (default 460800 = probe VCP; ignored on USB-CDC).",
+    )
+    debug_monitor.add_argument(
+        "--json", action="store_true",
+        help="Emit one JSON object per event (JSONL) instead of text lines.",
+    )
+    # json_error_boundary keeps the --json contract if map/input loading throws before
+    # the handler's own guards (mirrors debug-stub).
+    debug_monitor.set_defaults(func=json_error_boundary(cmd_debug_monitor))
 
     project_list_editions = subparsers.add_parser(
         "project-list-editions",
