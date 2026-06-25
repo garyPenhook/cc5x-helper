@@ -192,9 +192,20 @@ CVALUE:0:LP:LP oscillator
             create_atpack(
                 archive,
                 {
-                    "edc/PIC16F1509.PIC": "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' edc:arch='16Exxx' edc:procid='1509' edc:dsid='abc'><ProgramSpace/><DataSpace/></edc:PIC>",
-                    "xc8/pic/dat/ini/16f1509.ini": "[16F1509]\nARCH=PIC14E\nPROCID=1509\nROMSIZE=2000\nBANKS=20\nSFR=PORTA,C,8\n",
-                    "xc8/pic/dat/cfgdata/16f1509.cfgdata": "CWORD:8007:3EFF:3FFF:CONFIG1\nCSETTING:7:FOSC:Oscillator Selection Bits\nCVALUE:4:INTOSC:INTOSC oscillator\n",
+                    "edc/PIC16F1509.PIC": (
+                        "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' "
+                        "edc:arch='16Exxx' edc:procid='1509' edc:dsid='abc'>"
+                        "<ProgramSpace/><DataSpace/></edc:PIC>"
+                    ),
+                    "xc8/pic/dat/ini/16f1509.ini": (
+                        "[16F1509]\nARCH=PIC14E\nPROCID=1509\n"
+                        "ROMSIZE=2000\nBANKS=20\nSFR=PORTA,C,8\n"
+                    ),
+                    "xc8/pic/dat/cfgdata/16f1509.cfgdata": (
+                        "CWORD:8007:3EFF:3FFF:CONFIG1\n"
+                        "CSETTING:7:FOSC:Oscillator Selection Bits\n"
+                        "CVALUE:4:INTOSC:INTOSC oscillator\n"
+                    ),
                     "Microchip.PIC12-16F1xxx_DFP.pdsc": "pdsc",
                 },
             )
@@ -283,7 +294,11 @@ CVALUE:4:INTOSC:INTOSC oscillator
             create_atpack(
                 archive,
                 {
-                    "edc/PIC16F1509.PIC": "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' edc:arch='16Exxx' edc:procid='1509' edc:dsid='abc'><ProgramSpace/><DataSpace/></edc:PIC>",
+                    "edc/PIC16F1509.PIC": (
+                        "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' "
+                        "edc:arch='16Exxx' edc:procid='1509' edc:dsid='abc'>"
+                        "<ProgramSpace/><DataSpace/></edc:PIC>"
+                    ),
                     "xc8/pic/dat/ini/16f1509.ini": ini_text.strip() + "\n",
                     "xc8/pic/dat/cfgdata/16f1509.cfgdata": cfg_text.strip() + "\n",
                     "Microchip.PIC12-16F1xxx_DFP.pdsc": "pdsc",
@@ -350,7 +365,11 @@ CVALUE:4:OFF:Oscillator not enabled
             create_atpack(
                 archive,
                 {
-                    "edc/PIC16F15313.PIC": "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' edc:arch='16Exxx' edc:procid='A2AE' edc:dsid='abc'><ProgramSpace/><DataSpace/></edc:PIC>",
+                    "edc/PIC16F15313.PIC": (
+                        "<?xml version='1.0'?><edc:PIC xmlns:edc='http://crownking/edc' "
+                        "edc:arch='16Exxx' edc:procid='A2AE' edc:dsid='abc'>"
+                        "<ProgramSpace/><DataSpace/></edc:PIC>"
+                    ),
                     "xc8/pic/dat/ini/16f15313.ini": ini_text.strip() + "\n",
                     "xc8/pic/dat/cfgdata/16f15313.cfgdata": cfg_text.strip() + "\n",
                     "Microchip.PIC16F1xxxx_DFP.pdsc": "pdsc",
