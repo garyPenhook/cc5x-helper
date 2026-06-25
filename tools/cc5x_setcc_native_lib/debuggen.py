@@ -12,9 +12,11 @@ Design rules honored here:
   metadata; if a register or bit the requested tier needs is absent, generation fails
   with a clear error rather than emitting something the device does not have.
 * **No invented datasheet facts.** The EUSART baud divisor (SPBRG) depends on the runtime
-  ``Fosc``, which is *not* in pack metadata. The stub requires the value to be supplied
-  (manifest ``transport.brg``) or emits ``#error`` forcing the user to define
-  ``CDL_SPBRG_VALUE`` from their datasheet -- it never guesses one.
+  ``Fosc``, which is *not* in pack metadata. It is **derived** from manifest
+  ``transport.fosc`` + ``transport.baud`` via the datasheet EUSART BRG formula (see
+  :mod:`brg`, sourced from the Microchip docs and recorded as provenance), or taken from
+  an explicit ``transport.brg`` override -- never guessed. With neither, generation fails
+  with a clear error instead of emitting an unusable stub.
 * **CC5X-safe emission.** Pack-derived tokens pass through the same ``_safe_identifier`` /
   ``_safe_comment`` discipline as :mod:`headergen`.
 * **Tier capability floors are design rules, not measured facts.** The final tier must be
@@ -47,6 +49,7 @@ from .cdl_proto import (
     NAK_CODES,
     TIER_WIRE,
 )
+from . import brg as brgmod
 from .cdl_protogen import render_proto_defines
 from .headergen import _safe_comment, _safe_identifier
 from .measure import FcsReport, OccReport, VarSymbol
@@ -120,7 +123,8 @@ class DebugConfig:
     tx_pin: str | None
     rx_pin: str | None
     baud: int | None
-    brg: int | None  # explicit SPBRG value (never derived from Fosc)
+    fosc: int | None  # oscillator Hz; with baud, codegen derives SPBRG (P3, brg.py)
+    brg: int | None  # explicit SPBRG value (override; bypasses the Fosc computation)
     brgh: bool
     target_timestamp: bool
     breakpoints: str  # software | none
@@ -210,6 +214,7 @@ def parse_debug_config(payload: object) -> DebugConfig:
         tx_pin=_as_str(transport.get("tx_pin"), "transport.tx_pin"),
         rx_pin=_as_str(transport.get("rx_pin"), "transport.rx_pin"),
         baud=_as_int(transport.get("baud"), "transport.baud"),
+        fosc=_as_int(transport.get("fosc"), "transport.fosc"),
         brg=_as_int(transport.get("brg"), "transport.brg"),
         brgh=_as_bool(transport.get("brgh"), "transport.brgh", default=True),
         target_timestamp=_as_bool(
@@ -460,6 +465,53 @@ def select_tier(config: DebugConfig, caps: DeviceCaps) -> TierDecision:
     return TierDecision(tier=requested, provisional=True, forced=forced, reason=reason)
 
 
+# Tighter than the ~3% the async EUSART tolerates, to leave headroom for clock drift.
+MAX_BAUD_ERROR_FRAC = 0.025
+
+
+@dataclass(frozen=True)
+class BrgResolution:
+    """The effective EUSART baud setting (P3): either derived from Fosc+baud via
+    :mod:`brg` (the formula's provenance is recorded), or a manual ``transport.brg``
+    override. ``actual_baud``/``error_pct`` are populated only when computed."""
+
+    spbrg: int
+    brgh: bool
+    brg16: bool
+    computed: bool
+    fosc: int | None
+    baud: int | None
+    actual_baud: int | None
+    error_pct: float | None
+    source: str | None
+    source_url: str | None
+
+
+def resolve_brg(config: DebugConfig) -> BrgResolution | None:
+    """Resolve the SPBRG/BRGH the stub should use, or None if the manifest gives no
+    baud information. A manual ``transport.brg`` wins (override, byte-for-byte the
+    old behavior); otherwise ``transport.fosc`` + ``transport.baud`` drive the
+    EUSART BRG formula (brg.py, datasheet-sourced). Raises ValueError when a
+    requested Fosc/baud cannot be hit within tolerance by the 8-bit BRG."""
+    if config.brg is not None:
+        return BrgResolution(spbrg=config.brg & 0xFF, brgh=config.brgh, brg16=False,
+                             computed=False, fosc=config.fosc, baud=config.baud,
+                             actual_baud=None, error_pct=None,
+                             source="manual transport.brg override", source_url=None)
+    if config.fosc is not None and config.baud is not None:
+        sol = brgmod.compute_brg(config.fosc, config.baud)
+        if abs(sol.error_frac) > MAX_BAUD_ERROR_FRAC:
+            raise ValueError(
+                f"computed baud error {sol.error_pct:.2f}% for Fosc={config.fosc} Hz / "
+                f"baud={config.baud} exceeds {MAX_BAUD_ERROR_FRAC * 100:.1f}% on the 8-bit "
+                f"BRG; choose a UART-friendly Fosc or set transport.brg manually")
+        return BrgResolution(spbrg=sol.spbrg, brgh=sol.brgh, brg16=sol.brg16,
+                             computed=True, fosc=config.fosc, baud=config.baud,
+                             actual_baud=sol.actual_baud, error_pct=round(sol.error_pct, 2),
+                             source=brgmod.BRG_SOURCE, source_url=brgmod.BRG_SOURCE_URL)
+    return None
+
+
 def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision) -> list[str]:
     errors: list[str] = []
     if config.tier not in VALID_TIERS:
@@ -487,11 +539,15 @@ def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision
             errors.append(f"tier {tier!r} needs a hardware EUSART but none was detected in metadata")
         elif config.rx_pin and caps.eusart.rx_data is None:
             errors.append("rx_pin requested but no EUSART receive register (RCREG) found in metadata")
-        if config.brg is None:
-            errors.append(
-                "tier needs an EUSART baud divisor: set debug.transport.brg (the SPBRG value for "
-                "your Fosc/baud from the datasheet) -- it is not derivable from pack metadata"
-            )
+        try:
+            if resolve_brg(config) is None:
+                errors.append(
+                    "tier needs an EUSART baud divisor: set debug.transport.fosc (oscillator "
+                    "Hz) + debug.transport.baud so codegen derives SPBRG from the datasheet "
+                    "formula, or set debug.transport.brg to an explicit SPBRG value"
+                )
+        except ValueError as exc:
+            errors.append(str(exc))
         # READ_MEM uses FSR0/INDF0 linear addressing, predefined only on enhanced cores.
         if (caps.arch or "").upper() not in ENHANCED_ARCHS:
             errors.append(
@@ -598,6 +654,26 @@ def build_map(
             "and fill this in (02 §6 acceptance gate).",
         },
     }
+    # Baud provenance (P3): the SPBRG the stub uses, derived from Fosc+baud with a
+    # citable datasheet source, or a manual override. Absent if the manifest gives
+    # no baud info (e.g. trace/toggle tiers, or a config still to be filled in).
+    try:
+        resolved = resolve_brg(config)
+    except ValueError:
+        resolved = None
+    if resolved is not None:
+        payload["baud"] = {
+            "spbrg": resolved.spbrg,
+            "brgh": resolved.brgh,
+            "brg16": resolved.brg16,
+            "computed": resolved.computed,
+            "fosc_hz": resolved.fosc,
+            "requested": resolved.baud,
+            "actual": resolved.actual_baud,
+            "error_pct": resolved.error_pct,
+            "source": resolved.source,
+            "source_url": resolved.source_url,
+        }
     if decision.tier == "toggle":
         payload["toggle"] = {
             "encoding": config.toggle_encoding,
@@ -961,16 +1037,30 @@ def _render_source(
     if eu is None:  # defensive; validate_debug already rejects this for full/min
         raise ValueError(f"tier {tier!r} requires an EUSART that was not detected")
 
-    lines += [
-        "// Baud divisor is Fosc-dependent and NOT derivable from pack metadata; supply it",
-        "// (manifest transport.brg) or define CDL_SPBRG_VALUE here from the datasheet.",
-        "#ifndef CDL_SPBRG_VALUE",
-    ]
-    if config.brg is not None:
-        lines.append(f"#define CDL_SPBRG_VALUE 0x{config.brg & 0xFF:02X}")
+    resolved = resolve_brg(config)
+    if resolved is not None and resolved.computed:
+        # SPBRG derived from Fosc+baud via the datasheet EUSART BRG formula (P3).
+        lines += [
+            f"// SPBRG computed from Fosc+baud via the EUSART BRG formula ({resolved.source}).",
+            f"// Fosc={resolved.fosc} Hz, baud={resolved.baud} -> SPBRG={resolved.spbrg}, "
+            f"BRGH={int(resolved.brgh)} (actual {resolved.actual_baud} baud, "
+            f"{resolved.error_pct:+.2f}% error).",
+            f"// Source: {resolved.source_url}",
+            "#ifndef CDL_SPBRG_VALUE",
+            f"#define CDL_SPBRG_VALUE 0x{resolved.spbrg & 0xFF:02X}",
+            "#endif",
+        ]
     else:
-        lines.append('#error "define CDL_SPBRG_VALUE (SPBRG for your Fosc/baud, see EUSART baud table)"')
-    lines.append("#endif")
+        lines += [
+            "// Baud divisor is Fosc-dependent and NOT derivable from pack metadata; supply it",
+            "// (manifest transport.brg) or define CDL_SPBRG_VALUE here from the datasheet.",
+            "#ifndef CDL_SPBRG_VALUE",
+        ]
+        if config.brg is not None:
+            lines.append(f"#define CDL_SPBRG_VALUE 0x{config.brg & 0xFF:02X}")
+        else:
+            lines.append('#error "define CDL_SPBRG_VALUE (SPBRG for your Fosc/baud, see EUSART baud table)"')
+        lines.append("#endif")
     lines.append("")
     lines += _CRC_LINES + [""]
     lines += [
@@ -1002,7 +1092,10 @@ def _render_source(
         f"    {eu.spbrg} = CDL_SPBRG_VALUE;",
     ]
     txsta_val = 1 << eu.txen_bit
-    if config.brgh and eu.brgh_bit is not None:
+    # BRGH from the resolved baud setting: the computed divisor picks BRGH itself
+    # (manual transport.brg keeps config.brgh).
+    brgh_on = resolved.brgh if resolved is not None else config.brgh
+    if brgh_on and eu.brgh_bit is not None:
         txsta_val |= 1 << eu.brgh_bit
     init.append(f"    {eu.txsta} = 0x{txsta_val:02X};  // async (SYNC=0), TX enabled")
     rcsta_val = 1 << eu.spen_bit
