@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .cdl_proto import (
@@ -730,6 +731,75 @@ def apply_measurement(
     map_payload["symbols"] = symbols_from_var(varsyms)
     map_payload["budget"] = budget_from_occ(occ)
     return map_payload
+
+
+# One compiled+parsed measurement of the stub at a given tier: the (.occ, .var, .fcs)
+# reports for that tier's stub. ``fcs`` is None when the call structure was not
+# requested/produced. Returned by a ``MeasureFn`` so the gate can re-measure on demote.
+Measurement = tuple["OccReport", "list[VarSymbol]", "FcsReport | None"]
+# Compile the stub *at this tier* and return its parsed reports. Injected into
+# :func:`run_measure_gate` so the gate loop is pure/testable; the real implementation
+# (CrossOver CC5X compile + measure.parse_*) lives in validate_generated_headers.py.
+MeasureFn = Callable[[str], Measurement]
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """Outcome of the 02 §6 measured-budget gate (see :func:`run_measure_gate`)."""
+
+    decision: TierDecision            # final tier; provisional=False iff measurement-confirmed
+    occ: OccReport                    # the measurement at ``decision.tier`` ...
+    varsyms: list[VarSymbol]          # ... so apply_measurement fills the map from matching data
+    fcs: FcsReport | None
+    history: tuple[str, ...]          # one reason per attempt, oldest first (02 §6 "records why")
+
+    @property
+    def confirmed(self) -> bool:
+        return not self.decision.provisional
+
+
+def run_measure_gate(
+    decision: TierDecision,
+    caps: DeviceCaps,
+    measure: MeasureFn,
+    *,
+    hw_stack_depth: int | None = None,
+    app_headroom_frac: float = DEFAULT_APP_HEADROOM_FRAC,
+) -> GateResult:
+    """Run the 02 §6 acceptance gate: measure the stub at the provisional tier, then
+    confirm it or demote-and-re-measure down the full->min->trace->toggle ladder until
+    a tier's measured budget fits or the 'toggle' floor is reached.
+
+    ``decision`` is the provisional pick from :func:`select_tier`. ``measure(tier)``
+    compiles the stub *regenerated at that tier* and returns its parsed reports; it is
+    called once per tier tried (so a demote re-measures the lighter stub, per
+    :func:`confirm_tier`). The returned :class:`GateResult` carries the measurement that
+    matches the final tier, so the caller can ``apply_measurement`` with consistent data.
+
+    A confirmed result has ``decision.provisional is False``. If even the 'toggle' floor
+    fails to fit, the result stays provisional (``confirmed`` False) with the floor's
+    measurement and reason -- an honest gate failure the caller/CI must surface, not a
+    silent pass. The loop is bounded by the ladder length so a misbehaving ``measure``
+    cannot spin forever.
+    """
+    current = decision
+    history: list[str] = []
+    # At most one attempt per rung of the ladder; the floor (toggle->toggle) also breaks
+    # below, this bound is the belt-and-suspenders backstop.
+    for _ in range(len(TIER_ORDER)):
+        occ, varsyms, fcs = measure(current.tier)
+        result = confirm_tier(
+            current, caps, occ,
+            fcs=fcs, hw_stack_depth=hw_stack_depth, app_headroom_frac=app_headroom_frac,
+        )
+        history.append(result.reason)
+        if not result.provisional:                      # measurement-confirmed
+            return GateResult(result, occ, varsyms, fcs, tuple(history))
+        if result.tier == current.tier:                 # floored at 'toggle', cannot demote
+            return GateResult(result, occ, varsyms, fcs, tuple(history))
+        current = result                                # demoted; re-measure lighter stub
+    # Unreachable in practice (the floor breaks first); return the last state honestly.
+    return GateResult(current, occ, varsyms, fcs, tuple(history))
 
 
 # --------------------------------------------------------------------------------------

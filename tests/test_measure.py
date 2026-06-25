@@ -136,5 +136,76 @@ class MeasuredGate(unittest.TestCase):
         self.assertIn("measured", map_payload["tier_reason"])
 
 
+class MeasureGateLoop(unittest.TestCase):
+    """run_measure_gate: the 02 §6 confirm / demote-and-re-measure ladder."""
+
+    def setUp(self):
+        self.var = m.parse_var((GOLDEN / "stub_16f1509.var").read_text())
+
+    @staticmethod
+    def _fits():
+        # 21 B of 512 leaves > 50% for the app; 18 w fits any real flash.
+        return m.OccReport(chip="16F1509", ram_used=21, ram_free=491, code_words=18, code_pct=0)
+
+    @staticmethod
+    def _ram_overrun():
+        # 400 B of 512 leaves < 50% -> demote.
+        return m.OccReport(chip="16F1509", ram_used=400, ram_free=112, code_words=18, code_pct=0)
+
+    def _recording_measure(self, occ_for):
+        """A MeasureFn that records the tiers it was asked to compile, returning
+        ``occ_for(tier)`` and a single tier-tagged symbol so we can prove the result
+        carries the measurement matching the *final* tier."""
+        calls: list[str] = []
+
+        def measure(tier):
+            calls.append(tier)
+            sym = m.VarSymbol(name=f"sym_{tier}", cls="G", bank="0", address=0x20,
+                              bit=None, size=1, accesses=1)
+            return occ_for(tier), [sym], None
+        return measure, calls
+
+    def test_confirms_at_provisional_without_demote(self):
+        measure, calls = self._recording_measure(lambda t: self._fits())
+        res = dg.run_measure_gate(_provisional("full"), _caps(), measure)
+        self.assertTrue(res.confirmed)
+        self.assertEqual(res.decision.tier, "full")
+        self.assertEqual(calls, ["full"])          # measured exactly once
+        self.assertEqual(len(res.history), 1)
+        self.assertEqual(res.varsyms[0].name, "sym_full")  # measurement matches final tier
+
+    def test_demotes_then_confirms_and_remeasures(self):
+        # full overruns RAM; min fits -> demote once, re-measure the lighter stub.
+        occ_for = lambda t: self._fits() if t == "min" else self._ram_overrun()
+        measure, calls = self._recording_measure(occ_for)
+        res = dg.run_measure_gate(_provisional("full"), _caps(), measure)
+        self.assertTrue(res.confirmed)
+        self.assertEqual(res.decision.tier, "min")
+        self.assertEqual(calls, ["full", "min"])   # re-measured at the demoted tier
+        self.assertEqual(len(res.history), 2)
+        self.assertEqual(res.occ, self._fits())    # carries the min measurement, not full's
+        self.assertEqual(res.varsyms[0].name, "sym_min")
+
+    def test_floor_failure_stays_provisional(self):
+        # Nothing ever fits -> walk full->min->trace->toggle, end provisional (gate fails).
+        measure, calls = self._recording_measure(lambda t: self._ram_overrun())
+        res = dg.run_measure_gate(_provisional("full"), _caps(), measure)
+        self.assertFalse(res.confirmed)            # honest failure, not a silent pass
+        self.assertEqual(res.decision.tier, "toggle")
+        self.assertEqual(calls, ["full", "min", "trace", "toggle"])
+        self.assertEqual(len(res.history), 4)
+
+    def test_apply_measurement_consumes_gate_result(self):
+        # End-to-end: gate result folds straight into a map payload.
+        measure, _ = self._recording_measure(lambda t: self._fits())
+        res = dg.run_measure_gate(_provisional("full"), _caps(), measure)
+        map_payload = {"tier": "full", "tier_provisional": True, "symbols": {},
+                       "budget": {"measured": False}}
+        dg.apply_measurement(map_payload, res.decision, res.occ, res.varsyms)
+        self.assertFalse(map_payload["tier_provisional"])
+        self.assertTrue(map_payload["budget"]["measured"])
+        self.assertIn("sym_full", map_payload["symbols"])
+
+
 if __name__ == "__main__":
     unittest.main()
