@@ -166,15 +166,19 @@ class Deframer:
                 self._bad = False
             elif not self._in:
                 continue
-            elif b == proto.CDL_ESC:
-                self._esc = True
             elif self._esc:
+                # A pending escape consumes THIS byte, even if it is itself ESC --
+                # checking `b == ESC` first would let `ESC ESC` re-arm the escape and
+                # silently accept malformed wire (e.g. ESC ESC ESC_FLAG -> a bare
+                # FLAG byte). Only ESC_FLAG/ESC_ESC are valid escaped bytes.
                 orig = b ^ proto.CDL_ESC_XOR
                 if orig in (proto.CDL_FLAG, proto.CDL_ESC):
                     self._buf.append(orig)
                 else:
                     self._bad = True             # malformed escape -> drop frame
                 self._esc = False
+            elif b == proto.CDL_ESC:
+                self._esc = True
             else:
                 self._buf.append(b)
 
