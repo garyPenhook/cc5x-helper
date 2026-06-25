@@ -6,6 +6,7 @@ to the actual report format. Pure data: no compiler, no packs.
 """
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -136,6 +137,38 @@ class MeasuredGate(unittest.TestCase):
         self.assertIn("measured", map_payload["tier_reason"])
 
 
+class ReadReports(unittest.TestCase):
+    """read_reports: disk report files -> the gate's measurement tuple."""
+
+    def test_reads_all_three(self):
+        occ, var, fcs = m.read_reports(GOLDEN, "stub_16f1509")
+        self.assertEqual(occ.ram_total, 512)
+        self.assertTrue(any(s.name == "cdl_seq" for s in var))
+        self.assertEqual(fcs.max_depth, 3)
+
+    def test_fcs_optional(self):
+        # A build dir with only .occ + .var: stack check is opt-in, so fcs is None.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            for ext in (".occ", ".var"):
+                (tmp / f"s{ext}").write_text((GOLDEN / f"stub_16f1509{ext}").read_text())
+            occ, var, fcs = m.read_reports(tmp, "s")
+            self.assertIsNone(fcs)
+            self.assertEqual(occ.ram_total, 512)
+
+    def test_missing_occ_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(FileNotFoundError):
+                m.read_reports(d, "nope")
+
+    def test_missing_var_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "s.occ").write_text((GOLDEN / "stub_16f1509.occ").read_text())
+            with self.assertRaises(FileNotFoundError):
+                m.read_reports(tmp, "s")
+
+
 class MeasureGateLoop(unittest.TestCase):
     """run_measure_gate: the 02 §6 confirm / demote-and-re-measure ladder."""
 
@@ -176,7 +209,8 @@ class MeasureGateLoop(unittest.TestCase):
 
     def test_demotes_then_confirms_and_remeasures(self):
         # full overruns RAM; min fits -> demote once, re-measure the lighter stub.
-        occ_for = lambda t: self._fits() if t == "min" else self._ram_overrun()
+        def occ_for(tier):
+            return self._fits() if tier == "min" else self._ram_overrun()
         measure, calls = self._recording_measure(occ_for)
         res = dg.run_measure_gate(_provisional("full"), _caps(), measure)
         self.assertTrue(res.confirmed)

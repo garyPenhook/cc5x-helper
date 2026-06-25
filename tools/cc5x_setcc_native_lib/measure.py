@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -123,3 +124,32 @@ def parse_fcs(text: str) -> FcsReport:
             functions.append(m.group(2))
     return FcsReport(max_depth=max_level + 1 if max_level >= 0 else 0,
                      functions=tuple(functions))
+
+
+def read_reports(
+    directory: Path | str, stem: str, *, encoding: str = "latin-1"
+) -> tuple[OccReport, list[VarSymbol], FcsReport | None]:
+    """Read and parse the CC5X reports for a compiled stub, given the build directory
+    and the source stem (``stem`` = the ``.c`` basename without extension).
+
+    Bridges "report files on disk" to the gate's measurement tuple
+    (:data:`debuggen.Measurement`), so a compile step only has to drop the files and
+    name them; the parsing + tier decision live in pure, tested code.
+
+    ``.occ`` and ``.var`` are required (a missing one means the compile failed or did
+    not request the variable list); :func:`parse_occ`/:func:`parse_var` raise on a
+    malformed/truncated report. ``.fcs`` is optional -- absent, the stack check in
+    :func:`debuggen.confirm_tier` is simply skipped (it is opt-in anyway).
+    """
+    d = Path(directory)
+    occ_path = d / f"{stem}.occ"
+    var_path = d / f"{stem}.var"
+    fcs_path = d / f"{stem}.fcs"
+    if not occ_path.exists():
+        raise FileNotFoundError(f"{occ_path}: no .occ report (compile failed?)")
+    if not var_path.exists():
+        raise FileNotFoundError(f"{var_path}: no .var report (compile without the variable-list flag?)")
+    occ = parse_occ(occ_path.read_text(encoding=encoding))
+    varsyms = parse_var(var_path.read_text(encoding=encoding))
+    fcs = parse_fcs(fcs_path.read_text(encoding=encoding)) if fcs_path.exists() else None
+    return occ, varsyms, fcs
