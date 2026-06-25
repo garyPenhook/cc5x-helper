@@ -1,0 +1,86 @@
+{
+  "id": "T-001",
+  "title": "P4: debug-monitor PC command (decode + map + render)",
+  "status": "verified",
+  "board": null,
+  "tags": [
+    "firmware",
+    "p4"
+  ],
+  "created": "2026-06-25T16:20:25-04:00",
+  "updated": "2026-06-25T16:35:22-04:00",
+  "requirement": "Add a 'debug-monitor' PC command that decodes a CDL capture and renders named, timestamped trace using a cdl_map JSON. Two-layer decode: outer 0xF0 RELAY/0xF1 STATUS envelopes (probe-stamped) wrap inner target CDL frames (HELLO/TRACE/LOG/MEM_DATA/BP_HIT/ACK/NAK) that may split across envelopes. Apply the map: channel id->name + per-channel value width + target_tick presence for TRACE; symbol name<->address for MEM_DATA/READ_MEM. Pure library (cdl_monitor.py, no serial I/O in lib, mirroring cdl_codec); CLI reads canned bytes from a file/stdin so the whole path is CI-testable. Live serial is an optional pyserial-guarded extra. Also: pure command-encode helper (H2T) with symbol resolution for READ_MEM. Imports cdl_codec (the reference impl).",
+  "checklist": [
+    {
+      "n": 1,
+      "text": "cdl_monitor.py: two-layer Deframer (outer RELAY -> inner CDL), inner state survives across envelopes",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 2,
+      "text": "TRACE decode applies map: ch->name, value width per channel, optional tick gated by target_tick cap",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 3,
+      "text": "MEM_DATA/READ_MEM symbol<->address resolution via map symbols",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 4,
+      "text": "Render: named, timestamped, human-readable + --json structured output",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 5,
+      "text": "debug-monitor CLI subcommand: --map + file/stdin input; pyserial optional, import-guarded",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 6,
+      "text": "Command encode helper (PING/READ_MEM/SET_BP/CLR_BP/CONTINUE/SET_TRACE/WRITE_MEM), pure, tested",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 7,
+      "text": "Tests: canned-capture decode incl split-across-RELAY frame, STATUS drops, named trace, round-trip cmd; flake8 clean",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    },
+    {
+      "n": 8,
+      "text": "Acceptance (P4 gate): decodes canned frames + renders named trace in CI; full suite green",
+      "done": true,
+      "by": "CC",
+      "ts": "2026-06-25T16:35:22-04:00"
+    }
+  ],
+  "refs": [
+    {
+      "kind": "design",
+      "label": "cc5x-debug-probe/01-debug-link-protocol.md SS4/5/6/8; 05-cdl-proto-codec.md SS1/9 (P4 imports cdl_codec)",
+      "url": ""
+    }
+  ],
+  "links": [],
+  "notes": [
+    {
+      "ts": "2026-06-25T16:35:22-04:00",
+      "author": "CC",
+      "text": "P4 implemented on branch p4-debug-monitor. New cdl_monitor.py (Monitor/MonitorMap/Event): two-layer decode (outer 0xF0 RELAY/0xF1 STATUS envelopes -> persistent inner CDL Deframer, so a target frame split across envelopes is reassembled), map application (channel id->name + per-channel TRACE value width + target_tick-gated tick, MEM_DATA addr->symbol tagging), per-message renderers, and a symbol-resolving encode_command (H2T). New debug-monitor CLI subcommand (--map + --input/stdin/--hex; optional pyserial-guarded --port live capture; text or JSONL). 31 new tests (lib + CLI acceptance incl split-across-RELAY, STATUS drops, named trace, command round-trip). Full suite 369 passed, flake8 clean, CI hard gates green. Self-review: 3 adversarial finder agents -> fixed 5 findings (malformed-map shape now raises ValueError so CLI emits clean map_load_failed; encode_command unknown symbol KeyError->ValueError; BP_HIT ambiguous length flagged not silently truncated; error-branch dict(frame) simplification; extracted _extra_fields helper to dedupe header-key filter). Cross-file API tracer clean. NOT hardware-validated (P4 gate is CI-only: decode canned frames + render named trace -- met)."
+    }
+  ]
+}
