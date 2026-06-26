@@ -77,11 +77,61 @@ class BrghAvailability(unittest.TestCase):
         self.assertEqual((sol.spbrg, sol.brgh), (51, False))
 
 
+class SixteenBit(unittest.TestCase):
+    """Pin the 16-bit BRG (BRG16=1) to the datasheet's SYNC=0 tables. n is the full
+    SPxBRGH:SPxBRGL pair; the byte split is exposed via spbrgl/spbrgh."""
+
+    def test_default_stays_8bit(self):
+        # Without allow_brg16, a rate that fits 8-bit must resolve 8-bit (unchanged).
+        sol = brg.compute_brg(32_000_000, 9600)
+        self.assertFalse(sol.brg16)
+        self.assertEqual(sol.spbrgh, 0)
+
+    def test_16bit_slow_baud_min_error(self):
+        # 32 MHz / 300: 8-bit overflows; the lowest-error 16-bit mode is BRG16=1/
+        # BRGH=1 (F/[4(n+1)]), n=26666 -- the datasheet's BRGH=1/BRG16=1 300 row.
+        sol = brg.compute_brg(32_000_000, 300, allow_brg16=True)
+        self.assertTrue(sol.brg16)
+        self.assertTrue(sol.brgh)
+        self.assertEqual(sol.spbrg, 26666)
+        self.assertEqual((sol.spbrgh, sol.spbrgl), (0x68, 0x2A))  # 26666 = 0x682A
+        self.assertAlmostEqual(sol.error_pct, 0.0, places=2)
+
+    def test_16bit_brgh0_via_div16(self):
+        # Forcing BRGH=0 (÷16) selects the datasheet's BRG16=1/BRGH=0 row: 300 -> 6666.
+        sol = brg.compute_brg(32_000_000, 300, allow_brgh=False, allow_brg16=True)
+        self.assertEqual((sol.brg16, sol.brgh, sol.spbrg), (True, False, 6666))
+        self.assertEqual((sol.spbrgh, sol.spbrgl), (6666 >> 8, 6666 & 0xFF))
+
+    def test_16bit_brgh1_high_baud(self):
+        # 32 MHz / 115200: BRG16=1/BRGH=1 row gives n=68 (F/[4(n+1)]), 0.64% error.
+        sol = brg.compute_brg(32_000_000, 115200, allow_brg16=True)
+        self.assertTrue(sol.brg16)
+        self.assertTrue(sol.brgh)
+        self.assertEqual(sol.spbrg, 68)
+        self.assertEqual((sol.spbrgh, sol.spbrgl), (0, 68))
+        self.assertAlmostEqual(sol.error_pct, 0.64, places=2)
+
+    def test_16bit_brgh1_midband(self):
+        # 32 MHz / 2400: BRG16=1/BRGH=1 row gives n=3332; the finer 16-bit divisor
+        # wins on error over the in-range 8-bit fit.
+        sol = brg.compute_brg(32_000_000, 2400, allow_brg16=True)
+        self.assertTrue(sol.brg16)
+        self.assertTrue(sol.brgh)
+        self.assertEqual(sol.spbrg, 3332)
+        self.assertEqual((sol.spbrgh, sol.spbrgl), (3332 >> 8, 3332 & 0xFF))
+
+
 class OutOfRange(unittest.TestCase):
     def test_too_slow_for_8bit_raises(self):
         # 300 baud at 32 MHz needs n>255 in both 8-bit modes -> 16-bit territory.
         with self.assertRaises(ValueError):
             brg.compute_brg(32_000_000, 300)
+
+    def test_too_slow_resolves_with_brg16(self):
+        # The same rate is reachable once the 16-bit BRG is allowed.
+        sol = brg.compute_brg(32_000_000, 300, allow_brg16=True)
+        self.assertTrue(sol.brg16)
 
     def test_nonpositive_raises(self):
         with self.assertRaises(ValueError):

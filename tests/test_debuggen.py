@@ -24,6 +24,7 @@ def make_metadata(
     with_eusart=True,
     with_rx=True,
     with_timer=True,
+    with_brg16=False,
 ) -> DeviceMetadata:
     """Build a synthetic device model exercising the EUSART/RAM detection paths."""
     sfrs: list[IniSfr] = []
@@ -55,6 +56,11 @@ def make_metadata(
         bit("BRGH", 0x19, 2)
         bit("SPEN", 0x1A, 7)
         bit("CREN", 0x1A, 4)
+        if with_brg16:
+            # 16-bit BRG: high byte + BRG16 select bit (real 16F15244 names).
+            sfr("SP1BRGH", 0x1E)
+            sfr("BAUD1CON", 0x1F)
+            bit("BRG16", 0x1F, 3)
     if with_timer:
         sfr("TMR1L", 0x15)
         sfr("TMR1H", 0x16)
@@ -432,6 +438,11 @@ class BaudComputation(unittest.TestCase):
                    "channels": [{"name": "state"}]}
         return debuggen.generate_debug_stub(make_metadata(), payload)
 
+    def _gen16(self, transport):
+        payload = {"tier": "full", "transport": {"tx_pin": "RB7", **transport},
+                   "channels": [{"name": "state"}]}
+        return debuggen.generate_debug_stub(make_metadata(with_brg16=True), payload)
+
     def test_computes_spbrg_from_fosc_baud(self):
         gen = self._gen({"fosc": 32_000_000, "baud": 9600})
         self.assertIn("#define CDL_SPBRG_VALUE 0x33", gen.monitor_c)   # 51, BRGH=0
@@ -458,9 +469,42 @@ class BaudComputation(unittest.TestCase):
         self.assertIn("override", baud["source"])
 
     def test_unreachable_baud_rejected(self):
-        # 300 baud at 32 MHz: no in-range 8-bit SPBRG -> generation fails clearly.
+        # 300 baud at 32 MHz: no in-range 8-bit SPBRG, and this device exposes no
+        # BRG16 bit -> generation fails clearly rather than emitting a bad divisor.
         with self.assertRaises(ValueError):
             self._gen({"fosc": 32_000_000, "baud": 300})
+
+    def test_16bit_brg_emitted_for_slow_baud(self):
+        # Same 300/32 MHz, but on a device with the BRG16 bit + SPxBRGH: the stub
+        # selects 16-bit mode and loads both divisor bytes. The min-error fit is
+        # BRG16=1/BRGH=1, n=26666=0x682A -> SPBRGL 0x2A, SPBRGH 0x68; BRG16 is bit 3
+        # of BAUD1CON.
+        gen = self._gen16({"fosc": 32_000_000, "baud": 300})
+        c = gen.monitor_c
+        self.assertIn("#define CDL_SPBRG_VALUE 0x2A", c)
+        self.assertIn("#define CDL_SPBRGH_VALUE 0x68", c)
+        self.assertIn("BAUD1CON = 0x08;", c)            # BRG16 (bit 3) set
+        self.assertIn("SP1BRGH = CDL_SPBRGH_VALUE;", c)
+        self.assertIn("SP1BRGL = CDL_SPBRG_VALUE;", c)
+        baud = json.loads(gen.map_json)["baud"]
+        self.assertTrue(baud["brg16"])
+        self.assertTrue(baud["brgh"])
+        # spbrg/spbrgh are register bytes (n=26666=0x682A); divisor_n is the full value.
+        self.assertEqual(baud["spbrg"], 0x2A)
+        self.assertEqual(baud["spbrgh"], 0x68)
+        self.assertEqual(baud["divisor_n"], 26666)
+        self.assertEqual(baud["actual"], 300)
+
+    def test_8bit_kept_when_reachable_even_with_brg16(self):
+        # A rate the 8-bit BRG already hits within tolerance must NOT escalate to
+        # 16-bit, keeping the stub minimal and byte-identical to the 8-bit path.
+        gen = self._gen16({"fosc": 32_000_000, "baud": 9600})
+        self.assertIn("#define CDL_SPBRG_VALUE 0x33", gen.monitor_c)   # 51, BRGH=0
+        self.assertNotIn("CDL_SPBRGH_VALUE", gen.monitor_c)
+        self.assertNotIn("BAUD1CON", gen.monitor_c)
+        baud = json.loads(gen.map_json)["baud"]
+        self.assertFalse(baud["brg16"])
+        self.assertEqual(baud["spbrgh"], 0)
 
     def test_high_error_rejected(self):
         # 230400 at 32 MHz: best 8-bit error ~-3.55% exceeds tolerance -> rejected.
