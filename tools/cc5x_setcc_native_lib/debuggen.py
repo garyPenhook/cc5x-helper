@@ -92,8 +92,11 @@ _EUSART_RX_DATA = ("RCREG", "RC1REG", "RCREG1")
 _EUSART_TXSTA = ("TXSTA", "TX1STA", "TXSTA1")
 _EUSART_RCSTA = ("RCSTA", "RC1STA", "RCSTA1")
 _EUSART_SPBRG = ("SPBRGL", "SPBRG", "SP1BRGL", "SPBRG1", "SPBRGL1")
+_EUSART_SPBRGH = ("SPBRGH", "SP1BRGH", "SPBRGH1")
+_EUSART_BAUDCON = ("BAUDCON", "BAUD1CON", "BAUDCON1", "BAUD1CON1")
 
 _BIT_SPEN = ("SPEN",)
+_BIT_BRG16 = ("BRG16", "BRG161")
 _BIT_TXEN = ("TXEN", "TXEN1")
 _BIT_SYNC = ("SYNC", "SYNC1")
 _BIT_BRGH = ("BRGH", "BRGH1")
@@ -249,6 +252,20 @@ class EusartRegs:
     trmt_bit: int
     rcif_reg: str | None
     rcif_bit: int | None
+    spbrgh: str | None        # high byte of the 16-bit divisor (SPxBRGH)
+    baudcon: str | None       # register holding the BRG16 select bit
+    brg16_bit: int | None     # bit position of BRG16 within baudcon
+
+    @property
+    def has_brg16(self) -> bool:
+        """True when the metadata exposes everything needed to emit a 16-bit BRG:
+        the SPxBRGH high byte plus the BRG16 select bit (and its register). Without
+        all three the stub cannot select 16-bit mode, so codegen stays 8-bit."""
+        return (
+            self.spbrgh is not None
+            and self.baudcon is not None
+            and self.brg16_bit is not None
+        )
 
     @property
     def has_rx(self) -> bool:
@@ -363,12 +380,15 @@ def detect_caps(metadata: DeviceMetadata) -> DeviceCaps:
     txsta = _first_present(_EUSART_TXSTA, sfr_names)
     rcsta = _first_present(_EUSART_RCSTA, sfr_names)
     spbrg = _first_present(_EUSART_SPBRG, sfr_names)
+    spbrgh = _first_present(_EUSART_SPBRGH, sfr_names)
+    baudcon = _first_present(_EUSART_BAUDCON, sfr_names)
     rx_data = _first_present(_EUSART_RX_DATA, sfr_names)
 
     _, spen = _field(_BIT_SPEN, field_info)
     _, txen = _field(_BIT_TXEN, field_info)
     _, sync = _field(_BIT_SYNC, field_info)
     _, brgh = _field(_BIT_BRGH, field_info)
+    brg16_reg, brg16 = _field(_BIT_BRG16, field_info)
     _, cren = _field(_BIT_CREN, field_info)
     trmt_reg, trmt = _field(_BIT_TRMT, field_info)
     rcif_reg, rcif = _field(_BIT_RCIF, field_info)
@@ -397,6 +417,12 @@ def detect_caps(metadata: DeviceMetadata) -> DeviceCaps:
             trmt_bit=trmt,
             rcif_reg=rcif_reg,
             rcif_bit=rcif,
+            spbrgh=spbrgh,
+            # The register that actually contains BRG16 is authoritative (mirrors
+            # trmt_reg/rcif_reg); fall back to the name-detected BAUDCON only if the
+            # field had no resolvable container.
+            baudcon=brg16_reg or baudcon,
+            brg16_bit=brg16,
         )
 
     has_free_timer = "TMR1L" in sfr_names and "TMR1H" in sfr_names
@@ -475,7 +501,8 @@ class BrgResolution:
     :mod:`brg` (the formula's provenance is recorded), or a manual ``transport.brg``
     override. ``actual_baud``/``error_pct`` are populated only when computed."""
 
-    spbrg: int
+    spbrg: int           # divisor n: 8-bit (brg16=False) or full 16-bit pair
+    spbrgh: int          # high byte of n; 0 unless brg16
     brgh: bool
     brg16: bool
     computed: bool
@@ -487,35 +514,54 @@ class BrgResolution:
     source_url: str | None
 
 
-def resolve_brg(config: DebugConfig, *, brgh_available: bool = True) -> BrgResolution | None:
+def resolve_brg(config: DebugConfig, *, brgh_available: bool = True,
+                brg16_available: bool = False) -> BrgResolution | None:
     """Resolve the SPBRG/BRGH the stub should use, or None if the manifest gives no
     baud information. A manual ``transport.brg`` wins (override, byte-for-byte the
-    old behavior); otherwise ``transport.fosc`` + ``transport.baud`` drive the
+    old 8-bit behavior); otherwise ``transport.fosc`` + ``transport.baud`` drive the
     EUSART BRG formula (brg.py, datasheet-sourced). Raises ValueError when a
-    requested Fosc/baud cannot be hit within tolerance by the 8-bit BRG.
+    requested Fosc/baud cannot be hit within tolerance by the available BRG.
+
+    The computation is tried 8-bit first; only if that overflows or exceeds the
+    tolerance, and ``brg16_available`` holds, is the 16-bit BRG searched. Existing
+    8-bit-reachable rates therefore resolve byte-identically.
 
     ``brgh_available`` is whether the device exposes a BRGH bit; when False the
     computation is restricted to BRGH=0 (÷64), so a BRGH=1 divisor is never emitted
     as a bit the stub cannot set (which would silently run at the wrong baud)."""
     if config.brg is not None:
-        return BrgResolution(spbrg=config.brg & 0xFF, brgh=config.brgh, brg16=False,
-                             computed=False, fosc=config.fosc, baud=config.baud,
-                             actual_baud=None, error_pct=None,
+        return BrgResolution(spbrg=config.brg & 0xFF, spbrgh=0, brgh=config.brgh,
+                             brg16=False, computed=False, fosc=config.fosc,
+                             baud=config.baud, actual_baud=None, error_pct=None,
                              source="manual transport.brg override", source_url=None)
     if config.fosc is not None and config.baud is not None:
-        sol = brgmod.compute_brg(config.fosc, config.baud, allow_brgh=brgh_available)
+        # 8-bit first: keeps already-reachable rates byte-identical. Escalate to the
+        # 16-bit BRG only as a rescue (overflow or out-of-tolerance) when supported.
+        try:
+            sol = brgmod.compute_brg(config.fosc, config.baud, allow_brgh=brgh_available)
+        except ValueError:
+            sol = None
+        if (sol is None or abs(sol.error_frac) > MAX_BAUD_ERROR_FRAC) and brg16_available:
+            sol = brgmod.compute_brg(config.fosc, config.baud, allow_brgh=brgh_available,
+                                     allow_brg16=True)
+        if sol is None:
+            raise ValueError(
+                f"no in-range SPBRG for Fosc={config.fosc} Hz / baud={config.baud}; "
+                f"use a lower Fosc, a higher baud, or set transport.brg manually")
         if abs(sol.error_frac) > MAX_BAUD_ERROR_FRAC:
             hint = ("choose a UART-friendly Fosc or set transport.brg manually"
                     if brgh_available else
                     "this device exposes no BRGH bit (÷16 unavailable); pick a Fosc that "
                     "hits the baud in ÷64 mode or set transport.brg manually")
+            mode = "16-bit" if sol.brg16 else "8-bit"
             raise ValueError(
                 f"computed baud error {sol.error_pct:.2f}% for Fosc={config.fosc} Hz / "
-                f"baud={config.baud} exceeds {MAX_BAUD_ERROR_FRAC * 100:.1f}% on the 8-bit "
-                f"BRG; {hint}")
-        return BrgResolution(spbrg=sol.spbrg, brgh=sol.brgh, brg16=sol.brg16,
-                             computed=True, fosc=config.fosc, baud=config.baud,
-                             actual_baud=sol.actual_baud, error_pct=round(sol.error_pct, 2),
+                f"baud={config.baud} exceeds {MAX_BAUD_ERROR_FRAC * 100:.1f}% on the "
+                f"{mode} BRG; {hint}")
+        return BrgResolution(spbrg=sol.spbrg, spbrgh=sol.spbrgh, brgh=sol.brgh,
+                             brg16=sol.brg16, computed=True, fosc=config.fosc,
+                             baud=config.baud, actual_baud=sol.actual_baud,
+                             error_pct=round(sol.error_pct, 2),
                              source=brgmod.BRG_SOURCE, source_url=brgmod.BRG_SOURCE_URL)
     return None
 
@@ -523,6 +569,12 @@ def resolve_brg(config: DebugConfig, *, brgh_available: bool = True) -> BrgResol
 def _brgh_available(caps: DeviceCaps) -> bool:
     """Whether the device's EUSART exposes a BRGH field (so the ÷16 mode is usable)."""
     return caps.eusart is not None and caps.eusart.brgh_bit is not None
+
+
+def _brg16_available(caps: DeviceCaps) -> bool:
+    """Whether the device's EUSART exposes the BRG16 select bit + SPxBRGH high byte,
+    so the 16-bit BRG can be emitted."""
+    return caps.eusart is not None and caps.eusart.has_brg16
 
 
 def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision) -> list[str]:
@@ -553,7 +605,8 @@ def validate_debug(config: DebugConfig, caps: DeviceCaps, decision: TierDecision
         elif config.rx_pin and caps.eusart.rx_data is None:
             errors.append("rx_pin requested but no EUSART receive register (RCREG) found in metadata")
         try:
-            if resolve_brg(config, brgh_available=_brgh_available(caps)) is None:
+            if resolve_brg(config, brgh_available=_brgh_available(caps),
+                           brg16_available=_brg16_available(caps)) is None:
                 errors.append(
                     "tier needs an EUSART baud divisor: set debug.transport.fosc (oscillator "
                     "Hz) + debug.transport.baud so codegen derives SPBRG from the datasheet "
@@ -671,12 +724,20 @@ def build_map(
     # citable datasheet source, or a manual override. Absent if the manifest gives
     # no baud info (e.g. trace/toggle tiers, or a config still to be filled in).
     try:
-        resolved = resolve_brg(config, brgh_available=_brgh_available(caps))
+        resolved = resolve_brg(config, brgh_available=_brgh_available(caps),
+                               brg16_available=_brg16_available(caps))
     except ValueError:
         resolved = None
     if resolved is not None:
         payload["baud"] = {
-            "spbrg": resolved.spbrg,
+            # spbrg/spbrgh are the SPxBRGL/SPxBRGH *register bytes* (spbrgh=0 and the
+            # divisor fits spbrg alone in 8-bit mode), so a consumer loads them
+            # directly without re-splitting. divisor_n carries the full value for
+            # display. Keep these two as bytes -- do not pair them as (spbrgh<<8)|spbrg
+            # with a >8-bit spbrg.
+            "spbrg": resolved.spbrg & 0xFF,
+            "spbrgh": resolved.spbrgh,
+            "divisor_n": resolved.spbrg,
             "brgh": resolved.brgh,
             "brg16": resolved.brg16,
             "computed": resolved.computed,
@@ -1050,19 +1111,27 @@ def _render_source(
     if eu is None:  # defensive; validate_debug already rejects this for full/min
         raise ValueError(f"tier {tier!r} requires an EUSART that was not detected")
 
-    resolved = resolve_brg(config, brgh_available=_brgh_available(caps))
+    resolved = resolve_brg(config, brgh_available=_brgh_available(caps),
+                           brg16_available=_brg16_available(caps))
     if resolved is not None and resolved.computed:
         # SPBRG derived from Fosc+baud via the datasheet EUSART BRG formula (P3).
+        mode = "16-bit BRG16=1" if resolved.brg16 else "8-bit"
         lines += [
             f"// SPBRG computed from Fosc+baud via the EUSART BRG formula ({resolved.source}).",
-            f"// Fosc={resolved.fosc} Hz, baud={resolved.baud} -> SPBRG={resolved.spbrg}, "
-            f"BRGH={int(resolved.brgh)} (actual {resolved.actual_baud} baud, "
+            f"// Fosc={resolved.fosc} Hz, baud={resolved.baud} -> SPBRG={resolved.spbrg} "
+            f"({mode}), BRGH={int(resolved.brgh)} (actual {resolved.actual_baud} baud, "
             f"{resolved.error_pct:+.2f}% error).",
             f"// Source: {resolved.source_url}",
             "#ifndef CDL_SPBRG_VALUE",
             f"#define CDL_SPBRG_VALUE 0x{resolved.spbrg & 0xFF:02X}",
             "#endif",
         ]
+        if resolved.brg16:
+            lines += [
+                "#ifndef CDL_SPBRGH_VALUE",
+                f"#define CDL_SPBRGH_VALUE 0x{resolved.spbrgh:02X}",
+                "#endif",
+            ]
     else:
         lines += [
             "// Baud divisor is Fosc-dependent and NOT derivable from pack metadata; supply it",
@@ -1102,8 +1171,15 @@ def _render_source(
     init += [
         "    // NOTE: on PPS-capable parts, routing TX/RX to the chosen pins (the PPS output",
         "    // code is a datasheet value) is the application's responsibility.",
-        f"    {eu.spbrg} = CDL_SPBRG_VALUE;",
     ]
+    if resolved is not None and resolved.brg16 and eu.has_brg16:
+        # 16-bit BRG: select BRG16 and load the high byte before the low byte. Per the
+        # EUSART datasheet, writing SPxBRGL resets the BRG timer, so it must come last.
+        init += [
+            f"    {eu.baudcon} = 0x{1 << eu.brg16_bit:02X};  // BRG16=1 (16-bit BRG)",
+            f"    {eu.spbrgh} = CDL_SPBRGH_VALUE;",
+        ]
+    init.append(f"    {eu.spbrg} = CDL_SPBRG_VALUE;")
     txsta_val = 1 << eu.txen_bit
     # BRGH from the resolved baud setting: the computed divisor picks BRGH itself
     # (manual transport.brg keeps config.brgh).
