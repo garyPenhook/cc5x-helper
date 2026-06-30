@@ -26,6 +26,7 @@ from this formula with the source URL recorded as provenance, never a guess.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 # Citable provenance for the formula above (recorded in the stub comment + cdl_map).
@@ -87,10 +88,13 @@ def compute_brg(fosc_hz: int, baud: int, *, allow_brgh: bool = True,
     smallest |error|. With ``allow_brg16=True`` it also tries the two 16-bit modes
     (BRGH=0 ÷16, BRGH=1 ÷4; n up to 65535), keeping the 8-bit form on an exact tie.
 
-    Raises ValueError if no enabled mode yields an in-range divisor (n must be
-    0..255 for 8-bit, 0..65535 for 16-bit): a too-slow baud at a high Fosc needs
-    ``allow_brg16=True`` (if the device exposes a BRG16 bit) or a manual
-    ``transport.brg``.
+    Each mode's divisor is clamped into its representable range (n is 0..255 for
+    8-bit, 0..65535 for 16-bit) rather than discarded, so a baud whose ideal divisor
+    rounds just past the 8-bit ceiling still yields the in-range boundary divisor
+    instead of being rejected outright. The caller (resolve_brg) gates the returned
+    solution on its error tolerance and escalates to ``allow_brg16=True`` (if the
+    device exposes a BRG16 bit) or a manual ``transport.brg`` when a too-slow baud at
+    a high Fosc cannot be hit. ValueError is raised only for a non-positive Fosc/baud.
 
     ``allow_brgh=False`` restricts the search to the ÷64 (BRGH=0) modes, for devices
     whose metadata exposes no BRGH field: a BRGH=1 solution would otherwise be
@@ -111,16 +115,28 @@ def compute_brg(fosc_hz: int, baud: int, *, allow_brgh: bool = True,
 
     best: BrgSolution | None = None
     for brgh, mult, brg16, n_max in modes:
-        # n that brings Fosc/(M*(n+1)) closest to baud, rounded to the nearest int.
-        n = round(fosc_hz / (mult * baud)) - 1
-        if not 0 <= n <= n_max:
-            continue
-        actual = fosc_hz / (mult * (n + 1))
-        err = (actual - baud) / baud
-        cand = BrgSolution(spbrg=n, brgh=brgh, brg16=brg16, multiplier=mult,
-                           actual_baud=round(actual), error_frac=err)
-        if best is None or abs(cand.error_frac) < abs(best.error_frac):
-            best = cand
+        # Ideal real divisor count N = Fosc/(M*baud); n = N-1. Evaluate BOTH neighbouring
+        # integers (floor and ceil) and keep the lower-error one, each clamped into the
+        # representable range [0, n_max]. Two reasons not to just round():
+        #  * baud error is reciprocal in N, so the arithmetically-nearest N is not always
+        #    the lowest-error N;
+        #  * round() is banker's rounding (half-to-even), which at an exact .5 can pick the
+        #    higher-error divisor (e.g. 1.536 MHz/9600 -> +25% instead of -16.7%).
+        # Clamping (rather than skipping when the value lands past the ceiling) keeps the
+        # in-range boundary divisor as a candidate -- otherwise a baud ~0.5..1% below the
+        # 8-bit ceiling was rejected even though n_max is well within tolerance.
+        ideal = fosc_hz / (mult * baud)
+        floor_n = max(0, min(math.floor(ideal) - 1, n_max))
+        ceil_n = max(0, min(math.ceil(ideal) - 1, n_max))
+        # Ordered (floor first) and de-duped so codegen is deterministic and floor wins an
+        # exact error tie under the strict `<` comparison below.
+        for n in (floor_n,) if floor_n == ceil_n else (floor_n, ceil_n):
+            actual = fosc_hz / (mult * (n + 1))
+            err = (actual - baud) / baud
+            cand = BrgSolution(spbrg=n, brgh=brgh, brg16=brg16, multiplier=mult,
+                               actual_baud=round(actual), error_frac=err)
+            if best is None or abs(cand.error_frac) < abs(best.error_frac):
+                best = cand
 
     if best is None:
         extra = ("" if allow_brg16 else

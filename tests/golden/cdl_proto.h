@@ -32,6 +32,7 @@
 #define CDL_NAK_WRITE_DENIED 3
 #define CDL_NAK_BAD_LEN     4
 #define CDL_NAK_UNKNOWN_TYPE 5
+#define CDL_NAK_BAD_BP      6
 
 // --- probe-origin envelope types (cc5x-debug-probe relay.c) ---
 #define CDL_P_RELAY    0xF0

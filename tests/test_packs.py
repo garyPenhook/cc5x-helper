@@ -61,6 +61,13 @@ class PackReaderTests(unittest.TestCase):
     def test_normalize_pic_device_name(self) -> None:
         self.assertEqual(normalize_device_name("16f1509"), "PIC16F1509")
 
+    def test_normalize_rejects_path_separators(self) -> None:
+        # Guard against path traversal: a crafted device name must not be joined into
+        # the pack/metadata search dirs (e.g. "/etc/x" -> "PIC/ETC/X" -> absolute path).
+        for bad in ("/etc/x", "..\\..\\etc", "a/b", "x\x00y"):
+            with self.assertRaises(ValueError):
+                normalize_device_name(bad)
+
     def test_parse_pack_archive_info(self) -> None:
         info = parse_pack_archive_info(Path("Microchip.PIC16F1xxxx_DFP.1.29.444.atpack"))
         self.assertEqual(info.family, "PIC16F1xxxx_DFP")

@@ -60,7 +60,8 @@ class WireValueContract(unittest.TestCase):
             (p.CAP_MEM_READ, p.CAP_MEM_WRITE, p.CAP_SW_BREAKPOINTS,
              p.CAP_TARGET_TICK, p.CAP_RX_COMMANDS), (0x01, 0x02, 0x04, 0x08, 0x10))
         self.assertEqual(p.NAK_CODES, {"BAD_ADDR": 1, "SIDE_EFFECT": 2,
-                                       "WRITE_DENIED": 3, "BAD_LEN": 4, "UNKNOWN_TYPE": 5})
+                                       "WRITE_DENIED": 3, "BAD_LEN": 4, "UNKNOWN_TYPE": 5,
+                                       "BAD_BP": 6})
 
     def test_hello_layout(self):
         # 01 SS 4: ver, device-id(2), caps(1), tier(1), trace-ch-count(1) = 6 bytes,

@@ -20,6 +20,16 @@ def test_safe_comment_strips_backslash_line_splice() -> None:
     assert _safe_comment("  spaced   out  ") == "spaced out"
 
 
+def test_safe_comment_strips_nul_and_control_chars() -> None:
+    # str.split() does not treat NUL as whitespace and NUL is a valid latin-1 byte, so a
+    # NUL (or other C0 control) in a pack description would otherwise survive into the
+    # generated // comment.
+    cleaned = _safe_comment("clk\x00sel\x01\x1f end")
+    assert "\x00" not in cleaned
+    assert all(ch >= " " and ch != "\x7f" for ch in cleaned)
+    assert "clk" in cleaned and "end" in cleaned
+
+
 def test_safe_comment_replaces_non_latin1() -> None:
     # The header is written as latin-1; an unencodable description (audit #3) must be
     # replaced here so it cannot raise UnicodeEncodeError after the file was truncated.

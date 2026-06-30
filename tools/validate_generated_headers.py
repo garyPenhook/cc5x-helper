@@ -14,6 +14,7 @@ from cc5x_setcc_native import (
     DEFAULT_RUNNER,
     atomic_write_text,
     find_device_metadata,
+    reject_bare_runner,
 )
 from cc5x_setcc_native_lib import debuggen, measure
 from cc5x_setcc_native_lib.headergen import render_full_header
@@ -89,6 +90,10 @@ def runner_command(runner_spec: str) -> list[str]:
     parts = shlex.split(runner_spec)
     if not parts:
         raise SystemExit("--runner must not be empty")
+    # Same guard as the main CLI: a bare interpreter (e.g. "wine") with no {compiler}
+    # placeholder would drop the compiler path, so reject it instead of silently building
+    # a command that runs the interpreter with the flags as its program.
+    reject_bare_runner(parts)
     return [part.replace("{compiler}", str(DEFAULT_COMPILER)) for part in parts]
 
 
@@ -134,6 +139,7 @@ def run_compile(
             cwd=source_path.parent,
             text=True,
             capture_output=True,
+            errors="replace",  # CC5X/Wine may emit non-UTF-8 bytes; don't crash the validator on decode
             timeout=timeout,
         )
         returncode = completed.returncode

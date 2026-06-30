@@ -60,6 +60,7 @@ NAK_CODES = {
     "WRITE_DENIED": 3,
     "BAD_LEN": 4,
     "UNKNOWN_TYPE": 5,
+    "BAD_BP": 6,
 }
 
 # --- Wire tier byte for HELLO.tier. The A-full vs A-min distinction lives in caps

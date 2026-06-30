@@ -56,6 +56,7 @@ def make_metadata(
         bit("BRGH", 0x19, 2)
         bit("SPEN", 0x1A, 7)
         bit("CREN", 0x1A, 4)
+        bit("OERR", 0x1A, 1)   # RC1STA bit layout: SPEN7 RX9 SREN CREN4 ADDEN FERR OERR1 RX9D
         if with_brg16:
             # 16-bit BRG: high byte + BRG16 select bit (real 16F15244 names).
             sfr("SP1BRGH", 0x1E)
@@ -324,6 +325,16 @@ class StubEmissionTests(unittest.TestCase):
         self.assertIn("if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)
         self.assertIn("CDL_NAK_BAD_LEN", c)
 
+    def test_out_of_range_breakpoint_is_naked_not_acked(self):
+        # Regression: SET_BP/CLR_BP with id >= MAX_BP must NAK (BAD_BP), not silently ACK.
+        # An ACK would make the host believe a BP is armed and wait forever for a BP_HIT
+        # that can never fire.
+        c = self._gen().monitor_c
+        self.assertIn("cdl_nak(seq, CDL_NAK_BAD_BP); return; }", c)
+        # The old pattern (guarded mask update followed by an unconditional ACK) is gone.
+        self.assertNotIn("cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);\n            cdl_ack", c)
+        self.assertNotIn(") cdl_bp_mask |= cdl_bitmask", c)  # no `if (..<MAX_BP) cdl_bp_mask |=`
+
     def test_frame_length_must_match_exactly(self):
         # A frame with valid command+CRC followed by trailing bytes has len < cdl_rxn-4;
         # the dispatcher must drop it (exact match), not execute the command. Mirrors the
@@ -413,6 +424,49 @@ class StubEmissionTests(unittest.TestCase):
         self.assertNotIn("cdl_write_mem", c)
         self.assertNotIn("cdl_addr_writable", c)
 
+    def test_rx_frame_buffer_holds_max_write_mem_frame(self):
+        # Regression: cdl_rx must hold a full max WRITE_MEM frame, not just CDL_RX_MAX+1.
+        # The widest received frame is TYPE SEQ LEN addr_lo addr_hi + CDL_RX_MAX data + CRC
+        # (= 6 + CDL_RX_MAX). When the frame buffer was sized CDL_RX_MAX+1, a 16-byte write
+        # (frame of 22 bytes) overran the receive cap and was dropped before dispatch:
+        # cdl_rxn never reached len+4, so the exact-length check failed silently.
+        c = debuggen.generate_debug_stub(
+            make_metadata(),
+            {"tier": "full", "transport": {"tx_pin": "RB7", "rx_pin": "RB5", "brg": 25},
+             "write_mem": True, "channels": [{"name": "s"}]},
+        ).monitor_c
+        self.assertIn("#define CDL_FRAME_MAX (6 + CDL_RX_MAX)", c)
+        self.assertIn("static uns8 cdl_rx[CDL_FRAME_MAX];", c)
+        self.assertIn("if (cdl_rxn < CDL_FRAME_MAX) cdl_rx[cdl_rxn++] = b;", c)
+        # The data-payload cap stays CDL_RX_MAX; the conflated sizing/gate is gone.
+        self.assertNotIn("cdl_rx[CDL_RX_MAX + 1]", c)
+        self.assertNotIn("if (cdl_rxn <= CDL_RX_MAX)", c)
+
+    def test_rx_frame_buffer_minimal_without_write_mem(self):
+        # Without write_mem the widest received frame is READ_MEM (7 bytes), so the frame
+        # buffer is not padded to the WRITE_MEM width -- RAM budget on tiny parts matters.
+        c = self._gen().monitor_c  # default payload leaves write_mem off
+        self.assertIn("#define CDL_FRAME_MAX 7", c)
+        self.assertIn("static uns8 cdl_rx[CDL_FRAME_MAX];", c)
+
+    def test_cdl_poll_recovers_from_rx_overrun(self):
+        # Per datasheet 24.4.1.7: the 2-deep RX FIFO latches OERR on a 3rd byte and
+        # halts reception until CREN is toggled. cdl_poll must drain the FIFO and then,
+        # if OERR is set, clear+set CREN (RC1STA bit 4) to re-enable -- otherwise a
+        # polling gap permanently jams inbound commands.
+        c = debuggen.generate_debug_stub(
+            make_metadata(),
+            {"tier": "full", "transport": {"tx_pin": "RB7", "rx_pin": "RB5", "brg": 25},
+             "channels": [{"name": "s"}]},
+        ).monitor_c
+        self.assertIn("if (RC1STA & 0x02) {", c)   # OERR is RC1STA bit 1
+        self.assertIn("RC1STA &= 0xEF;", c)         # clear CREN (bit 4) -> clears OERR
+        self.assertIn("RC1STA |= 0x10;", c)         # set CREN -> resume reception
+        # Recovery is inside cdl_poll, after the FIFO drain.
+        poll = c.split("void cdl_poll(void) {", 1)[1].split("}", 1)[0]
+        self.assertIn("while (PIR1 & 0x20) cdl_rx_byte(RC1REG);", poll)
+        self.assertLess(poll.index("cdl_rx_byte"), poll.index("RC1STA & 0x02"))
+
     def test_writable_ranges_excludes_sfrs(self):
         ranges = debuggen._writable_ranges(make_metadata())
         flat: set[int] = set()
@@ -427,6 +481,27 @@ class StubEmissionTests(unittest.TestCase):
         h = self._gen().monitor_h
         self.assertIn("#define CDL_DEVID_HI      0xA3", h)
         self.assertIn("#define CDL_DEVID_LO      0x05", h)
+
+    def test_hello_devid_round_trips_little_endian(self):
+        # Regression: HELLO.devid is U16LE on the wire (cdl_proto). The stub emitted
+        # the bytes HI-then-LO, so the host decoded a byte-swapped device id (0xA305 ->
+        # 0x05A3). Build the HELLO ARG exactly as the generated cdl_hello() assigns it,
+        # then round-trip through the real codec instead of string-matching the defines.
+        import re
+        from cc5x_setcc_native_lib import cdl_codec
+
+        out = self._gen()
+        defines = dict(re.findall(r"#define (CDL_DEVID_[A-Z]+)\s+0x([0-9A-Fa-f]+)", out.monitor_h))
+        lo = int(defines["CDL_DEVID_LO"], 16)
+        hi = int(defines["CDL_DEVID_HI"], 16)
+        body = re.search(r"void cdl_hello\(void\) \{(.*?)\}", out.monitor_c, re.S).group(1)
+        sym = {"CDL_DEVID_LO": lo, "CDL_DEVID_HI": hi}
+        # Reconstruct a[0..5] in index order from the `a[i] = SYM;` assignments.
+        arg = [0] * 6
+        for idx, rhs in re.findall(r"a\[(\d)\]\s*=\s*(CDL_DEVID_[A-Z]+);", body):
+            arg[int(idx)] = sym[rhs]
+        decoded = cdl_codec.decode_args("HELLO", bytes(arg))
+        self.assertEqual(decoded["devid"], (hi << 8) | lo)   # 0xA305, not 0x05A3
 
 
 class BaudComputation(unittest.TestCase):

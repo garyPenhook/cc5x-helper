@@ -37,6 +37,10 @@ def _safe_comment(text: str) -> str:
     only at write time — after the destination had been opened for truncation.
     """
     collapsed = " ".join(text.replace("\\", " ").split())
+    # str.split() collapses C0 whitespace but not NUL or the other control characters, and
+    # NUL is a valid latin-1 byte that survives the encode below — drop anything below space
+    # (and DEL) so no control char leaks into the // comment.
+    collapsed = "".join(ch for ch in collapsed if ch >= " " and ch != "\x7f")
     return collapsed.encode("latin-1", "replace").decode("latin-1")
 
 
@@ -182,9 +186,11 @@ def _ram_limit(metadata: DeviceMetadata) -> int | None:
 
 def _render_chip_pragma(metadata: DeviceMetadata) -> list[str]:
     profile = _profile_for_arch(metadata.ini_arch)
-    code_size = metadata.rom_size_words or 0
+    # Clamp at 0 so malformed pack metadata (e.g. a hex field parsed as "-2000") cannot emit
+    # a negative `code`/`ram` into the #pragma chip directive (audit #6, as _sum_range_bytes).
+    code_size = max(0, metadata.rom_size_words or 0)
     ram_bytes = _sum_range_bytes(metadata.ram_ranges)
-    ram_origin = metadata.ram_ranges[0].start if metadata.ram_ranges else 0
+    ram_origin = max(0, metadata.ram_ranges[0].start if metadata.ram_ranges else 0)
     ram_limit = _ram_limit(metadata)
     line = (
         f"#pragma chip {_safe_identifier(metadata.device)}, core {profile.core}, "
@@ -401,11 +407,17 @@ def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
     canonical_by_address, alias_groups = _build_register_groups(metadata)
     use_pragma_bit = (metadata.ini_arch or "").upper() == "PIC14"
     register_names = {sfr.address: sfr.name for sfr in canonical_by_address.values()}
-    register_names.update(
-        {
-            0x0B: "INTCON",
-        }
-    )
+    # INTCON sits at 0x0B on the mid-range / enhanced mid-range cores, and packs sometimes
+    # list only its bit fields (not the 8-bit register), so synthesize the name to group
+    # them. The baseline 12-bit core has no interrupt system and no INTCON (confirmed via
+    # datasheet), so skip it there -- injecting it would mislabel whatever register the pack
+    # places at 0x0B.
+    if (metadata.ini_arch or "").upper() != "PIC12":
+        register_names.update(
+            {
+                0x0B: "INTCON",
+            }
+        )
     fields_by_address: dict[int, list[IniSfrField]] = {}
     for field in metadata.sfr_fields:
         fields_by_address.setdefault(field.address, []).append(field)

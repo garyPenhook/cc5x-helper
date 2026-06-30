@@ -101,6 +101,7 @@ _BIT_TXEN = ("TXEN", "TXEN1")
 _BIT_SYNC = ("SYNC", "SYNC1")
 _BIT_BRGH = ("BRGH", "BRGH1")
 _BIT_CREN = ("CREN", "CREN1")
+_BIT_OERR = ("OERR", "OERR1")
 _BIT_TRMT = ("TRMT", "TRMT1")
 _BIT_RCIF = ("RCIF", "RC1IF")
 
@@ -248,6 +249,7 @@ class EusartRegs:
     sync_bit: int
     brgh_bit: int | None
     cren_bit: int | None
+    oerr_bit: int | None      # Overrun Error bit in rcsta; recovered by toggling CREN
     trmt_reg: str
     trmt_bit: int
     rcif_reg: str | None
@@ -390,6 +392,7 @@ def detect_caps(metadata: DeviceMetadata) -> DeviceCaps:
     _, brgh = _field(_BIT_BRGH, field_info)
     brg16_reg, brg16 = _field(_BIT_BRG16, field_info)
     _, cren = _field(_BIT_CREN, field_info)
+    _, oerr = _field(_BIT_OERR, field_info)
     trmt_reg, trmt = _field(_BIT_TRMT, field_info)
     rcif_reg, rcif = _field(_BIT_RCIF, field_info)
 
@@ -413,6 +416,7 @@ def detect_caps(metadata: DeviceMetadata) -> DeviceCaps:
             sync_bit=sync,
             brgh_bit=brgh,
             cren_bit=cren,
+            oerr_bit=oerr,
             trmt_reg=trmt_reg,
             trmt_bit=trmt,
             rcif_reg=rcif_reg,
@@ -1072,8 +1076,8 @@ _FRAMER_LINES = [
     "static void cdl_hello(void) {",
     "    uns8 a[6];",
     "    a[0] = CDL_PROTO_MAJOR;",
-    "    a[1] = CDL_DEVID_HI;",
-    "    a[2] = CDL_DEVID_LO;",
+    "    a[1] = CDL_DEVID_LO;",   # devid is U16LE on the wire (cdl_proto): low byte first
+    "    a[2] = CDL_DEVID_HI;",
     "    a[3] = CDL_CAPS;",
     "    a[4] = CDL_TIER;",
     "    a[5] = CDL_CH_COUNT;",
@@ -1212,9 +1216,17 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
     sw_bp = config.breakpoints == "software"
     write_mem = config.write_mem
     writable = _writable_ranges(metadata) if write_mem else []
+    # cdl_rx holds a full de-framed packet: TYPE SEQ LEN <args> CRC. CDL_RX_MAX is the
+    # data-payload cap (READ_MEM bytes returned / WRITE_MEM bytes accepted); the frame
+    # buffer must be sized separately, since the widest received frame is a max WRITE_MEM:
+    # TYPE SEQ LEN addr_lo addr_hi + CDL_RX_MAX data + CRC = 6 + CDL_RX_MAX. Conflating the
+    # two (cdl_rx[CDL_RX_MAX + 1]) truncated near-max writes before dispatch. Without
+    # write_mem the widest frame is READ_MEM (TYPE SEQ LEN lo hi count CRC = 7).
+    frame_max = "(6 + CDL_RX_MAX)" if write_mem else "7"
     lines: list[str] = [
         "#define CDL_RX_MAX 16",
-        "static uns8 cdl_rx[CDL_RX_MAX + 1];",
+        f"#define CDL_FRAME_MAX {frame_max}",
+        "static uns8 cdl_rx[CDL_FRAME_MAX];",
         "static uns8 cdl_rxn;",
         "static bit cdl_inframe;",
         "static bit cdl_rxesc;",
@@ -1334,11 +1346,13 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         lines += [
             "    } else if (type == CDL_T_SET_BP) {",
             "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
-            f"        if (cdl_rx[3] < {MAX_BP}) cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);",
+            f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}  // don't ACK a BP that can never fire",
+            "        cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);",
             "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CLR_BP) {",
             "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
-            f"        if (cdl_rx[3] < {MAX_BP}) cdl_bp_mask &= (cdl_bitmask(cdl_rx[3]) ^ 0xFF);",
+            f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}",
+            "        cdl_bp_mask &= (cdl_bitmask(cdl_rx[3]) ^ 0xFF);",
             "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CONTINUE) {",
             "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
@@ -1360,6 +1374,20 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
             "",
         ]
     else:
+        # The 2-deep RX FIFO latches OERR if a 3rd byte arrives before it is drained,
+        # and reception then halts until CREN is toggled (datasheet 24.4.1.7, confirmed
+        # via Microchip MCP). Without this, any polling gap > ~2 char-times during inbound
+        # traffic permanently jams the receiver -- no NAK, just silence. Drain first so the
+        # two buffered bytes are still recovered, then clear OERR by toggling CREN.
+        oerr_recovery: list[str] = []
+        if eu.oerr_bit is not None and eu.cren_bit is not None:
+            cren_mask = 1 << eu.cren_bit
+            oerr_recovery = [
+                f"    if ({eu.rcsta} & 0x{1 << eu.oerr_bit:02X}) {{           // RX overrun: re-enable receiver",
+                f"        {eu.rcsta} &= 0x{(~cren_mask) & 0xFF:02X};",
+                f"        {eu.rcsta} |= 0x{cren_mask:02X};",
+                "    }",
+            ]
         lines += [
             "static void cdl_rx_byte(uns8 b) {",
             "    if (b == CDL_FLAG) {",
@@ -1372,11 +1400,12 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
             "    if (!cdl_inframe) return;",
             "    if (b == CDL_ESC) { cdl_rxesc = 1; return; }",
             "    if (cdl_rxesc) { b ^= CDL_ESC_XOR; cdl_rxesc = 0; }",
-            "    if (cdl_rxn <= CDL_RX_MAX) cdl_rx[cdl_rxn++] = b;",
+            "    if (cdl_rxn < CDL_FRAME_MAX) cdl_rx[cdl_rxn++] = b;",
             "}",
             "",
             "void cdl_poll(void) {",
             f"    while ({eu.rcif_reg} & 0x{1 << eu.rcif_bit:02X}) cdl_rx_byte({eu.rx_data});",
+            *oerr_recovery,
             "}",
             "",
         ]
