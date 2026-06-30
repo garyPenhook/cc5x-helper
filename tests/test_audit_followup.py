@@ -35,7 +35,13 @@ from cc5x_setcc_native import (
     render_config_block_from_symbols,
     update_managed_block,
 )
-from cc5x_setcc_native_lib.picmeta import DeviceMetadata
+from cc5x_setcc_native_lib.headergen import _render_bit_section, _render_chip_pragma
+from cc5x_setcc_native_lib.picmeta import (
+    DeviceMetadata,
+    IniSfr,
+    IniSfrField,
+    MemoryRange,
+)
 from cc5x_setcc_native_lib.project import default_project_manifest
 from cc5x_setcc_native_lib.packs import find_device_in_atpacks, list_devices_in_atpacks
 
@@ -165,6 +171,47 @@ class AtomicWriteTests(unittest.TestCase):
                 with self.assertRaises(UnicodeEncodeError):
                     build.ensure_project_header(root / "setcc-native.json", project)
             self.assertEqual(header.read_text(encoding="latin-1"), "// original header\n")
+
+
+def _metadata(**overrides) -> DeviceMetadata:
+    base = dict(
+        device="PIC12F509", ini_arch="PIC12", ini_procid=None, rom_size_words=1,
+        banks=1, bank_size=1, sfr_count=0, sfr_field_count=0, config_word_count=0,
+        config_setting_count=0, config_value_count=0, config_words=[], sfrs=[],
+        sfr_fields=[], ram_ranges=[], common_ranges=[], icd_ram_ranges=[], pic_summary=None,
+    )
+    base.update(overrides)
+    return DeviceMetadata(**base)
+
+
+class PackDataValidationTests(unittest.TestCase):
+    """Hardening: malformed/family-mismatched pack data must not steer header directives."""
+
+    def test_negative_rom_size_does_not_emit_negative_code(self) -> None:
+        # A hex field parsed as "-2000" -> int(..,16) = -8192 must not reach `#pragma chip
+        # ... code -8192` (clamped at 0, like _sum_range_bytes does for ram).
+        md = _metadata(ini_arch="PIC14E", rom_size_words=-8192,
+                       ram_ranges=[MemoryRange(start=0x20, end=0x6F)])
+        pragma = "\n".join(_render_chip_pragma(md))
+        self.assertIn("code 0", pragma)
+        self.assertNotIn("-8192", pragma)
+        self.assertNotIn("code -", pragma)
+
+    def test_intcon_not_synthesized_for_baseline_pic12(self) -> None:
+        # The baseline 12-bit core has no INTCON; a bit field the pack lists at 0x0B must
+        # keep its real register name, not be relabelled INTCON.
+        fields = [IniSfrField(name="GPWUF", address=0x0B, bit_position=7, width=1)]
+        sfrs = [IniSfr(name="OPTION2", address=0x0B, width=8)]
+        md = _metadata(ini_arch="PIC12", sfrs=sfrs, sfr_fields=fields)
+        section = "\n".join(_render_bit_section(md))
+        self.assertNotIn("INTCON", section)
+
+    def test_intcon_still_synthesized_for_midrange(self) -> None:
+        # Sanity: on a mid-range core the 0x0B INTCON synthesis is preserved.
+        fields = [IniSfrField(name="GIE", address=0x0B, bit_position=7, width=1)]
+        md = _metadata(device="PIC16F1509", ini_arch="PIC14E", sfrs=[], sfr_fields=fields)
+        section = "\n".join(_render_bit_section(md))
+        self.assertIn("INTCON", section)
 
 
 class BuildJsonLaunchFailureTests(unittest.TestCase):

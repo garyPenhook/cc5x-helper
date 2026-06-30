@@ -1321,6 +1321,14 @@ class ValidateGeneratedHeadersTests(unittest.TestCase):
         command = validate_headers.runner_command('wine "{compiler}"')
         self.assertEqual(command, ["wine", str(validate_headers.DEFAULT_COMPILER)])
 
+    def test_runner_command_rejects_bare_interpreter(self) -> None:
+        # Same guard as the main CLI: a bare "wine" with no {compiler} would drop the
+        # compiler path, so the validation helper must reject it rather than build a
+        # command that runs wine with the flags as its program.
+        with self.assertRaises(SystemExit) as ctx:
+            validate_headers.runner_command("wine")
+        self.assertIn("{compiler}", str(ctx.exception))
+
 
 class InstallRootDefaultsTests(unittest.TestCase):
     """Frozen-aware toolchain defaults (audit #8): a PyInstaller bundle must not point its

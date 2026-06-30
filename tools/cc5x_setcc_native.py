@@ -512,6 +512,20 @@ RUNNER_COMPILER_PLACEHOLDER = "{compiler}"
 _BARE_INTERPRETERS = {"wine", "wine64", "wine-stable", "wine-development", "cxrun"}
 
 
+def reject_bare_runner(runner: list[str]) -> None:
+    """Raise if a placeholder-free ``runner`` leads with a bare interpreter that would drop
+    the compiler path (e.g. ``["wine"]`` with no ``{compiler}``). A runner carrying the
+    placeholder, or a self-contained wrapper, passes. Shared so every entry point that builds
+    a runner command (the CLI here and validate_generated_headers) rejects the same mistake."""
+    if any(RUNNER_COMPILER_PLACEHOLDER in token for token in runner):
+        return
+    if runner and Path(runner[0]).name.lower() in _BARE_INTERPRETERS:
+        raise SystemExit(
+            f"runner {runner[0]!r} needs the compiler path; add the {{compiler}} "
+            f"placeholder, e.g. \"{runner[0]} {{compiler}}\""
+        )
+
+
 def build_command(
     compiler: str,
     main_file: str,
@@ -539,11 +553,7 @@ def build_command(
     if any(RUNNER_COMPILER_PLACEHOLDER in token for token in runner):
         command = [token.replace(RUNNER_COMPILER_PLACEHOLDER, compiler) for token in runner]
     else:
-        if Path(runner[0]).name.lower() in _BARE_INTERPRETERS:
-            raise SystemExit(
-                f"runner {runner[0]!r} needs the compiler path; add the {{compiler}} "
-                f"placeholder, e.g. \"{runner[0]} {{compiler}}\""
-            )
+        reject_bare_runner(runner)
         command = list(runner)
     command.extend(options)
     command.append(main_file)
@@ -1344,6 +1354,7 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
                 cwd=run_cwd,
                 capture_output=True,
                 text=True,
+                errors="replace",  # CC5X/Wine may emit non-UTF-8 bytes; never raise UnicodeDecodeError past the JSON boundary
                 timeout=_timeout_seconds(args),
             )
         except OSError as exc:
@@ -1754,6 +1765,7 @@ def cmd_program(args: argparse.Namespace) -> int:
                 command,
                 capture_output=True,
                 text=True,
+                errors="replace",  # IPECMD output may contain non-UTF-8 bytes; never raise UnicodeDecodeError past the JSON boundary
                 timeout=_timeout_seconds(args),
             )
             payload["stdout"] = completed.stdout
@@ -1787,6 +1799,10 @@ def cmd_program(args: argparse.Namespace) -> int:
     if completed.returncode != 0:
         # Surface the exit code as a structured error plus actionable guidance the extension
         # can show in the Problems/output channel (TODO Phase 5).
+        # In --json mode IPECMD output was captured above, so the matched-cause hint can be
+        # ordered from it. In human mode IPECMD streamed straight to the terminal (stdout/
+        # stderr are None here) and the user can read the real error; guidance then falls
+        # back to the generic checklist, which is intentional, not a missed capture.
         guidance = ipecmd_failure_guidance(
             getattr(completed, "stdout", "") or "",
             getattr(completed, "stderr", "") or "",
@@ -2859,7 +2875,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_config.add_argument("--header", required=True)
     list_config.add_argument("--json", action="store_true")
-    list_config.set_defaults(func=cmd_list_config)
+    list_config.set_defaults(func=json_error_boundary(cmd_list_config))
 
     render = subparsers.add_parser(
         "render-config",

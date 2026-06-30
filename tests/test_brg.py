@@ -58,6 +58,14 @@ class Selection(unittest.TestCase):
         self.assertEqual((sol.spbrg, sol.brgh), (17, False))
         self.assertEqual(sol.actual_baud, 9600)
 
+    def test_half_divisor_picks_lower_error_neighbor(self):
+        # 1.536 MHz / 9600 in div64 gives an exact-half ideal divisor (N=2.5). round()'s
+        # banker's rounding would pick N=2 (+25% error); evaluating both neighbours must
+        # instead pick the lower-error N=3 (spbrg=2, -16.7%).
+        sol = brg.compute_brg(1_536_000, 9600, allow_brgh=False)
+        self.assertEqual(sol.spbrg, 2)
+        self.assertLess(abs(sol.error_pct), 20.0)
+
     def test_ties_prefer_brgh0(self):
         # 32 MHz/9600: ÷64,n=51 and ÷16,n=207 give the identical divisor (3328) and
         # identical error -- the 8-bit/BRGH=0 form is kept.
@@ -123,10 +131,25 @@ class SixteenBit(unittest.TestCase):
 
 
 class OutOfRange(unittest.TestCase):
-    def test_too_slow_for_8bit_raises(self):
-        # 300 baud at 32 MHz needs n>255 in both 8-bit modes -> 16-bit territory.
-        with self.assertRaises(ValueError):
-            brg.compute_brg(32_000_000, 300)
+    def test_too_slow_for_8bit_clamps_to_ceiling(self):
+        # 300 baud at 32 MHz needs n>255 in both 8-bit modes. compute_brg is now
+        # best-effort: it clamps to the in-range ceiling (÷64, n=255) rather than
+        # raising, and the large error (~551%) is what the caller gates on / escalates
+        # to the 16-bit BRG for.
+        sol = brg.compute_brg(32_000_000, 300)
+        self.assertEqual((sol.spbrg, sol.brgh, sol.brg16), (255, False, False))
+        self.assertGreater(abs(sol.error_pct), 100.0)
+
+    def test_boundary_baud_below_8bit_ceiling_uses_n_max(self):
+        # Regression: baud ~0.5..1% below the 8-bit ÷64 ceiling at 32 MHz. The ideal
+        # divisor rounds to n_max+1..+3, but n_max (=255) is well within tolerance, so
+        # it must be returned -- not rejected. Previously this raised ValueError and
+        # blocked stub generation on devices without a BRG16 bit.
+        for baud in (1930, 1942, 1949):
+            sol = brg.compute_brg(32_000_000, baud, allow_brg16=False)
+            self.assertEqual(sol.spbrg, 255, f"baud {baud}")
+            self.assertFalse(sol.brg16, f"baud {baud}")
+            self.assertLess(abs(sol.error_pct), 2.5, f"baud {baud}")
 
     def test_too_slow_resolves_with_brg16(self):
         # The same rate is reachable once the 16-bit BRG is allowed.

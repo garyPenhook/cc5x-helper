@@ -51,6 +51,12 @@ class PackArchiveInfo:
 
 def normalize_device_name(device: str) -> str:
     text = device.strip().upper()
+    # Device names are bare part numbers; a path separator (or NUL) means a crafted
+    # value like "/tmp/x" that would escape the pack/metadata search dirs once joined
+    # into candidate paths / rglob patterns (e.g. search_dir / "/TMP/X.PIC" collapses
+    # to an absolute path). Reject them here so every consumer is protected at the source.
+    if any(ch in text for ch in ("/", "\\", "\x00")):
+        raise ValueError(f"invalid device name {device!r}: path separators are not allowed")
     if text.startswith(("ATTINY", "ATMEGA", "AVR", "SAM", "ATSAM")):
         return text
     if not text.startswith("PIC"):

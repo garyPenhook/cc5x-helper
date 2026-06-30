@@ -222,7 +222,7 @@ Compile directly:
 
 ```bash
 python3 tools/cc5x_setcc_native.py build \
-  --runner wine \
+  --runner "wine {compiler}" \
   --compiler /path/to/CC5X.EXE \
   --main app.c \
   --option=-p16F1509 \

@@ -59,6 +59,10 @@ let manifestDiagnostics: vscode.DiagnosticCollection;
 let artifacts: ArtifactsProvider;
 let statusBar: vscode.StatusBarItem;
 let currentProject: ProjectInfo | undefined;
+// Monotonic guard so a slow reloadProject racing a newer reload (or a manifest delete)
+// cannot stomp currentProject with stale values once its loadProject() finally resolves.
+// Mirrors the generation counters in manifestDiagnostics.ts / artifacts.ts.
+let reloadGeneration = 0;
 let configLens: Cc5xConfigLensProvider;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -119,6 +123,9 @@ export function activate(context: vscode.ExtensionContext): void {
       // and re-evaluate the config lens (it must vanish once there is no project).
       watcher.onDidDelete(() => {
         currentProject = undefined;
+        // Bump the reload generation so an in-flight reloadProject (started before this
+        // delete) cannot resurrect currentProject when its loadProject() resolves.
+        reloadGeneration++;
         // Bumps the validate generation too, so an in-flight validate cannot re-publish
         // diagnostics for the just-deleted manifest.
         clearManifestDiagnostics(manifestDiagnostics);
@@ -169,15 +176,24 @@ function ensureTrusted(): boolean {
 }
 
 async function reloadProject(root: vscode.WorkspaceFolder): Promise<void> {
+  const myGen = ++reloadGeneration;
+  let loaded: ProjectInfo | undefined;
   try {
-    currentProject = await loadProject(root);
-    const sourceDir = path.dirname(resolveManifestRelative(root, currentProject.main_source));
+    loaded = await loadProject(root);
+  } catch (err) {
+    channel.appendLine(`CC5X: could not load manifest: ${String(err)}`);
+  }
+  // A newer reload (or a manifest delete, which also bumps reloadGeneration) started while
+  // we awaited — let it own currentProject rather than overwriting fresh state with ours.
+  if (myGen !== reloadGeneration) {
+    return;
+  }
+  currentProject = loaded;
+  if (loaded) {
+    const sourceDir = path.dirname(resolveManifestRelative(root, loaded.main_source));
     // 'build' is a VS Code workspace convention (not a manifest-relative path), so it stays
     // anchored to the workspace root; main_source genuinely is manifest-relative.
     artifacts.setSearchDirs([sourceDir, path.join(root.uri.fsPath, 'build')]);
-  } catch (err) {
-    currentProject = undefined;
-    channel.appendLine(`CC5X: could not load manifest: ${String(err)}`);
   }
   // Re-validate the manifest into the Problems panel (unknown config symbols, illegal
   // values, missing provided header). Only when trusted — this spawns the helper, which

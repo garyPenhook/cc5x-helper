@@ -82,7 +82,7 @@ jobs:
     - name: Compile (strict tsc)
       run: npm run compile
     - name: Package VSIX
-      run: npx --yes @vscode/vsce package --no-dependencies -o cc5x-vscode.vsix
+      run: npm run package -- --no-dependencies -o cc5x-vscode.vsix
 
   locked:
     # Install strictly from the committed uv.lock so a drifting transitive dependency cannot
