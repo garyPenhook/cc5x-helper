@@ -151,9 +151,9 @@ def intellisense_defines(metadata, device: str, cc5x_version: int = DEFAULT_CC5X
         defines[f"_{short}"] = "1"
 
     arch = (getattr(metadata, "ini_arch", None) or "").upper()
-    if arch in {"PIC12", "PIC14", "PIC14E", "PIC14EX"}:
+    if arch in {"PIC12", "PIC12IE", "PIC14", "PIC14E", "PIC14EX"}:
         defines["_16CXX"] = "1"  # always defined for the 12- and 14-bit cores
-    if arch == "PIC12":
+    if arch in {"PIC12", "PIC12IE"}:
         defines["__CoreSet__"] = "1200"
         defines["_16C5X"] = "1"
     elif arch == "PIC14":

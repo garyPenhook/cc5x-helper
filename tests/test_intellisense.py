@@ -68,6 +68,14 @@ class IntellisenseDefinesTests(unittest.TestCase):
         self.assertEqual(defines["_16C5X"], "1")
         self.assertEqual(defines["_10F200"], "1")
 
+    def test_pic12ie_core_sets_12bit_editor_macros(self) -> None:
+        defines = intellisense.intellisense_defines(self._meta("PIC12IE"), "PIC16F527")
+        self.assertEqual(defines["__CoreSet__"], "1200")
+        self.assertEqual(defines["_16CXX"], "1")
+        self.assertEqual(defines["_16C5X"], "1")
+        self.assertEqual(defines["_16F527"], "1")
+        self.assertNotIn("__EnhancedCore14__", defines)
+
     def test_unknown_arch_omits_coreset(self) -> None:
         # Never invent a core macro we cannot justify; the marker/version/device still hold.
         defines = intellisense.intellisense_defines(self._meta(None), "PIC18F4550")
