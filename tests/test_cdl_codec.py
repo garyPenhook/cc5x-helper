@@ -133,6 +133,19 @@ class Recovery(unittest.TestCase):
         self.assertEqual(out[0]["type"], 0x7A)
         self.assertEqual(out[0]["args"], b"\xab")
 
+    def test_unterminated_oversize_frame_is_bounded(self):
+        d = c.Deframer()
+        out = list(d.feed(bytes([0x7E]) + b"\x00" * (c.MAX_DEFRAMED_FRAME + 1)))
+        self.assertEqual(
+            out,
+            [{"error": "overflow", "raw": (b"\x00" * c.MAX_DEFRAMED_FRAME).hex()}],
+        )
+        # After overflow, arbitrary bytes are ignored until the next FLAG resynchronizes.
+        self.assertEqual(
+            list(d.feed(b"\x00\x00" + c.encode("STATUS", 12, dropped=7)))[0]["seq"],
+            12,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

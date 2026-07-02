@@ -60,6 +60,8 @@ let manifestDiagnostics: vscode.DiagnosticCollection;
 let artifacts: ArtifactsProvider;
 let statusBar: vscode.StatusBarItem;
 let currentProject: ProjectInfo | undefined;
+let buildActive = false;
+let programActive = false;
 // Monotonic guard so a slow reloadProject racing a newer reload (or a manifest delete)
 // cannot stomp currentProject with stale values once its loadProject() finally resolves.
 // Mirrors the generation counters in manifestDiagnostics.ts / artifacts.ts.
@@ -642,6 +644,19 @@ async function runBuild(root: vscode.WorkspaceFolder | undefined): Promise<void>
   if (!ensureTrusted() || !requireRoot(root)) {
     return;
   }
+  if (buildActive) {
+    vscode.window.showInformationMessage('CC5X: a build is already running.');
+    return;
+  }
+  buildActive = true;
+  try {
+    await runBuildInner(root);
+  } finally {
+    buildActive = false;
+  }
+}
+
+async function runBuildInner(root: vscode.WorkspaceFolder): Promise<void> {
   const edition = await pickEdition(root, 'Select edition to build');
   if (!edition) {
     return;
@@ -678,6 +693,19 @@ async function runProgram(root: vscode.WorkspaceFolder | undefined): Promise<voi
   if (!ensureTrusted() || !requireRoot(root)) {
     return;
   }
+  if (programActive) {
+    vscode.window.showInformationMessage('CC5X: programming is already in progress.');
+    return;
+  }
+  programActive = true;
+  try {
+    await runProgramInner(root);
+  } finally {
+    programActive = false;
+  }
+}
+
+async function runProgramInner(root: vscode.WorkspaceFolder): Promise<void> {
   const edition = await pickEdition(root, 'Select edition to program');
   if (!edition) {
     return;

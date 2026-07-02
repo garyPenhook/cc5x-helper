@@ -196,7 +196,7 @@ def _render_chip_pragma(metadata: DeviceMetadata) -> list[str]:
     # a negative `code`/`ram` into the #pragma chip directive (audit #6, as _sum_range_bytes).
     code_size = max(0, metadata.rom_size_words or 0)
     ram_bytes = _sum_range_bytes(metadata.ram_ranges)
-    ram_origin = max(0, metadata.ram_ranges[0].start if metadata.ram_ranges else 0)
+    ram_origin = max(0, min((item.start for item in metadata.ram_ranges), default=0))
     ram_limit = _ram_limit(metadata)
     line = (
         f"#pragma chip {_safe_identifier(metadata.device)}, core {profile.core}, "
@@ -444,7 +444,7 @@ def _alias_bit_name(alias_register: str, base_register: str, base_bit_name: str)
 
 
 def _should_emit_alias(metadata: DeviceMetadata, canonical_name: str, alias_name: str) -> bool:
-    if metadata.ini_arch == "PIC14EX":
+    if (metadata.ini_arch or "").upper() == "PIC14EX":
         return alias_name in PIC14EX_ALIAS_WHITELIST
     return True
 

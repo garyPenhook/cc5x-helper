@@ -35,7 +35,11 @@ from cc5x_setcc_native import (
     render_config_block_from_symbols,
     update_managed_block,
 )
-from cc5x_setcc_native_lib.headergen import _render_bit_section, _render_chip_pragma
+from cc5x_setcc_native_lib.headergen import (
+    _render_bit_section,
+    _render_chip_pragma,
+    _should_emit_alias,
+)
 from cc5x_setcc_native_lib.picmeta import (
     DeviceMetadata,
     IniSfr,
@@ -196,6 +200,22 @@ class PackDataValidationTests(unittest.TestCase):
         self.assertIn("code 0", pragma)
         self.assertNotIn("-8192", pragma)
         self.assertNotIn("code -", pragma)
+
+    def test_ram_origin_uses_lowest_range_start(self) -> None:
+        md = _metadata(
+            ini_arch="PIC14E",
+            ram_ranges=[
+                MemoryRange(start=0xA0, end=0xEF),
+                MemoryRange(start=0x20, end=0x6F),
+            ],
+        )
+        pragma = "\n".join(_render_chip_pragma(md))
+        self.assertIn("ram 32 : 0xEF", pragma)
+
+    def test_pic14ex_alias_whitelist_is_case_insensitive(self) -> None:
+        md = _metadata(ini_arch="pic14ex")
+        self.assertTrue(_should_emit_alias(md, "RC1STA", "RCSTA1"))
+        self.assertFalse(_should_emit_alias(md, "RC1STA", "NOT_WHITELISTED"))
 
     def test_intcon_not_synthesized_for_baseline_pic12(self) -> None:
         # The baseline 12-bit core has no INTCON; a bit field the pack lists at 0x0B must

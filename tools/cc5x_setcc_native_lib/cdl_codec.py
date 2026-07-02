@@ -21,6 +21,8 @@ from collections.abc import Iterator
 
 from . import cdl_proto as proto
 
+MAX_DEFRAMED_FRAME = 3 + 255 + 1  # TYPE SEQ LEN + max ARG + CRC
+
 
 def crc8(data: bytes) -> int:
     """CRC-8 over ``data`` using the cdl_proto parameters (poly 0x07, init 0x00)."""
@@ -181,6 +183,12 @@ class Deframer:
                 self._esc = True
             else:
                 self._buf.append(b)
+            if len(self._buf) > MAX_DEFRAMED_FRAME:
+                yield {"error": "overflow", "raw": bytes(self._buf[:MAX_DEFRAMED_FRAME]).hex()}
+                self._buf.clear()
+                self._in = False
+                self._esc = False
+                self._bad = False
 
     @staticmethod
     def _decode(inner: bytes) -> dict:

@@ -51,7 +51,7 @@ def test_validate_device_reports_generation_failure(monkeypatch, tmp_path: Path)
     assert "unsupported metadata" in results[0].stderr
 
 
-def test_generate_device_header_falls_back_to_shipped_header(monkeypatch, tmp_path: Path) -> None:
+def test_generate_device_header_fails_when_pack_metadata_is_missing(monkeypatch, tmp_path: Path) -> None:
     shipped_root = tmp_path / "headers"
     shipped_root.mkdir()
     (shipped_root / "12F1552.H").write_text("// BKND shipped header\n", encoding="latin-1")
@@ -92,7 +92,12 @@ def test_generate_device_header_falls_back_to_shipped_header(monkeypatch, tmp_pa
     monkeypatch.setattr(validator, "find_device_metadata", fake_find)
     monkeypatch.setattr(validator, "load_device_metadata", fake_load)
 
-    assert validator.generate_device_header("PIC12F1552") == "// BKND shipped header\n"
+    try:
+        validator.generate_device_header("PIC12F1552")
+    except validator.MissingPackMetadataError as exc:
+        assert "no pack metadata" in str(exc)
+    else:
+        raise AssertionError("missing pack metadata must not fall back to shipped header")
 
 
 def test_all_shipped_success_policy_ignores_shipped_control_failures() -> None:

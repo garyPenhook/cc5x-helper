@@ -343,6 +343,7 @@ class StubEmissionTests(unittest.TestCase):
         # the frame bad and refuse to dispatch it, mirroring cdl_codec's _bad flag (audit).
         c = self._gen().monitor_c
         self.assertIn("static bit cdl_rxbad;", c)
+        self.assertLess(c.index("if (cdl_rxesc) {"), c.index("else if (b == CDL_ESC)"))
         self.assertIn("if (b != CDL_FLAG && b != CDL_ESC) { cdl_rxbad = 1; return; }", c)
         # Dispatch is gated on a clean frame: not poisoned and not left mid-escape.
         self.assertIn("!cdl_rxbad && !cdl_rxesc) cdl_dispatch();", c)

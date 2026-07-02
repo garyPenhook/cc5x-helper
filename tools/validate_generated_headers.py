@@ -53,6 +53,10 @@ VALIDATION_ROOT = PROJECT_ROOT / "validation" / "generated"
 SHIPPED_CC5X_HEADER_RE = re.compile(r"^(?:10F|12F|16F)[0-9A-Z]+\.H$", re.IGNORECASE)
 
 
+class MissingPackMetadataError(RuntimeError):
+    """Raised when a generated header cannot be produced from pack metadata."""
+
+
 @dataclass(frozen=True)
 class CompileResult:
     label: str
@@ -223,9 +227,9 @@ def generate_device_header(device: str) -> str:
         pic_reference=result.get("pic"),
     )
     if metadata.ini_arch is None and not (metadata.sfrs or metadata.config_words):
-        shipped_header_path = SHIPPED_HEADER_ROOT / f"{short_device_name(device)}.H"
-        if shipped_header_path.exists():
-            return shipped_header_path.read_text(encoding="latin-1")
+        raise MissingPackMetadataError(
+            f"{device}: no pack metadata available for generated header"
+        )
     return render_full_header(metadata)
 
 
