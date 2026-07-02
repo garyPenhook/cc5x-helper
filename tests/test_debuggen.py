@@ -320,9 +320,12 @@ class StubEmissionTests(unittest.TestCase):
             debuggen.generate_debug_stub(make_metadata(), {"tier": "full"})
 
     def test_command_length_guards_emitted(self):
-        # READ_MEM/SET_BP/etc must NAK BAD_LEN on a too-short frame, not read stale bytes.
+        # Fixed-length commands must NAK BAD_LEN unless the length is EXACT (not merely >=),
+        # mirroring the reference decoder which rejects short OR trailing ARG bytes.
         c = self._gen().monitor_c
-        self.assertIn("if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)
+        self.assertIn("if (len != 0) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)  # PING (no args)
+        self.assertIn("if (len != 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)  # READ_MEM
+        self.assertIn("if (len != 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }", c)  # SET_BP/CLR_BP/CONTINUE
         self.assertIn("CDL_NAK_BAD_LEN", c)
 
     def test_out_of_range_breakpoint_is_naked_not_acked(self):
@@ -334,6 +337,15 @@ class StubEmissionTests(unittest.TestCase):
         # The old pattern (guarded mask update followed by an unconditional ACK) is gone.
         self.assertNotIn("cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);\n            cdl_ack", c)
         self.assertNotIn(") cdl_bp_mask |= cdl_bitmask", c)  # no `if (..<MAX_BP) cdl_bp_mask |=`
+
+    def test_invalid_escape_drops_frame(self):
+        # A byte after ESC that is not FLAG/ESC is malformed wire; the target parser must mark
+        # the frame bad and refuse to dispatch it, mirroring cdl_codec's _bad flag (audit).
+        c = self._gen().monitor_c
+        self.assertIn("static bit cdl_rxbad;", c)
+        self.assertIn("if (b != CDL_FLAG && b != CDL_ESC) { cdl_rxbad = 1; return; }", c)
+        # Dispatch is gated on a clean frame: not poisoned and not left mid-escape.
+        self.assertIn("!cdl_rxbad && !cdl_rxesc) cdl_dispatch();", c)
 
     def test_frame_length_must_match_exactly(self):
         # A frame with valid command+CRC followed by trailing bytes has len < cdl_rxn-4;

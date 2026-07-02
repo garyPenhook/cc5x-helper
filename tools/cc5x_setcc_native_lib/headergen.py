@@ -85,6 +85,8 @@ PIC14EX_ALIAS_WHITELIST = {
 # Device architectures the header generator can map to a CC5X `core` value. Anything else
 # is rejected rather than emitted verbatim (audit #6).
 KNOWN_ARCHS = {"PIC12", "PIC14", "PIC14E", "PIC14EX", "PIC16"}
+BIT_NAME_FORMATS = {"combined", "long", "short"}
+DEFAULT_BIT_NAME_FORMAT = "combined"
 
 
 @dataclass(frozen=True)
@@ -318,13 +320,25 @@ def _canonical_8bit_sfrs(metadata: DeviceMetadata) -> tuple[dict[int, IniSfr], l
     return canonical_by_address, ordered
 
 
-def _render_sfr_section(metadata: DeviceMetadata) -> list[str]:
+def _render_sfr_section(
+    metadata: DeviceMetadata, emitted_ids: set[str] | None = None
+) -> list[str]:
+    if emitted_ids is None:
+        emitted_ids = set()
     canonical_by_address, ordered = _canonical_8bit_sfrs(metadata)
     predefined_registers = _predefined_registers(metadata)
     use_pragma_char = (metadata.ini_arch or "").upper() == "PIC14"
     lines: list[str] = []
+    # ``emitted_ids`` is the shared device-wide set of emitted sanitized identifiers (see
+    # render_full_header): two registers/aliases whose raw names collapse to the same C
+    # identifier cannot both emit a ``char`` declaration, and the bit section sees these ids too.
     for sfr in ordered:
         safe_name = _safe_identifier(sfr.name)
+        if safe_name in emitted_ids:
+            # The register name collides with one already declared; skip the whole block — its
+            # aliases reference ``safe_name`` and would otherwise dangle.
+            continue
+        emitted_ids.add(safe_name)
         if use_pragma_char:
             lines.append(f"#pragma char {safe_name} @ 0x{sfr.address:X}")
         else:
@@ -337,6 +351,9 @@ def _render_sfr_section(metadata: DeviceMetadata) -> list[str]:
             if not _should_emit_alias(metadata, sfr.name, alias.name):
                 continue
             safe_alias = _safe_identifier(alias.name)
+            if safe_alias in emitted_ids:
+                continue
+            emitted_ids.add(safe_alias)
             if use_pragma_char:
                 lines.append(f"#pragma char {safe_alias} @ {safe_name}")
             else:
@@ -403,7 +420,18 @@ def _should_emit_alias(metadata: DeviceMetadata, canonical_name: str, alias_name
     return True
 
 
-def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
+def _render_bit_section(
+    metadata: DeviceMetadata,
+    emitted_ids: set[str] | None = None,
+    bit_name_format: str = DEFAULT_BIT_NAME_FORMAT,
+) -> list[str]:
+    if bit_name_format not in BIT_NAME_FORMATS:
+        raise ValueError(
+            f"unsupported bit name format {bit_name_format!r}; "
+            f"expected one of {', '.join(sorted(BIT_NAME_FORMATS))}"
+        )
+    if emitted_ids is None:
+        emitted_ids = set()
     canonical_by_address, alias_groups = _build_register_groups(metadata)
     use_pragma_bit = (metadata.ini_arch or "").upper() == "PIC14"
     register_names = {sfr.address: sfr.name for sfr in canonical_by_address.values()}
@@ -428,7 +456,13 @@ def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
         if sfr.width == 8 or sfr.width == 16
     }
     blocked_names.update(_predefined_bit_names(metadata))
-    seen_names: set[str] = set()
+    # Dedup on the *sanitized* C identifier, not the raw pack name: two distinct raw bit names
+    # can sanitize to the same identifier (e.g. ``BIT-0`` and ``BIT.0`` -> ``BIT_0``), and
+    # emitting both would produce a duplicate ``bit`` declaration that fails to compile
+    # (audit: identifiers collide after sanitization). ``emitted_ids`` is shared with the SFR
+    # section, so a bit that sanitizes to an already-declared ``char``/alias identifier is
+    # dropped too rather than re-declaring the same C symbol across the two namespaces.
+    seen_names = emitted_ids
     lines: list[str] = []
     for address, register_name in sorted(register_names.items()):
         fields = fields_by_address.get(address, [])
@@ -447,10 +481,15 @@ def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
             if suppress_exploded and field.name.startswith(register_name):
                 continue
             base_names = _canonical_bit_names(field.name)
-            for base_name in base_names:
+            if bit_name_format == "long":
+                emit_names = [f"{register_name}_{base_name}" for base_name in base_names]
+            else:
+                emit_names = base_names
+            for base_name in emit_names:
                 if base_name in blocked_names:
                     continue
-                if base_name not in seen_names:
+                safe_base = _safe_identifier(base_name)
+                if safe_base not in seen_names:
                     block_map[register_name].append(
                         _render_bit_declaration(
                             name=base_name,
@@ -460,12 +499,17 @@ def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
                             use_pragma_bit=use_pragma_bit,
                         )
                     )
-                    seen_names.add(base_name)
+                    seen_names.add(safe_base)
+            if bit_name_format == "short":
+                continue
             for alias in aliases:
                 alias_name = _alias_bit_name(alias.name, register_name, base_names[0])
+                if bit_name_format == "long":
+                    alias_name = f"{alias.name}_{alias_name}"
                 if alias_name in blocked_names:
                     continue
-                if alias_name in seen_names:
+                safe_alias = _safe_identifier(alias_name)
+                if safe_alias in seen_names:
                     continue
                 block_map[alias.name].append(
                     _render_bit_declaration(
@@ -476,7 +520,7 @@ def _render_bit_section(metadata: DeviceMetadata) -> list[str]:
                         use_pragma_bit=use_pragma_bit,
                     )
                 )
-                seen_names.add(alias_name)
+                seen_names.add(safe_alias)
         for name, block in register_blocks:
             if not block:
                 continue
@@ -507,14 +551,21 @@ def _render_bit_declaration(
     return f"bit {safe_name} @ {safe_register}.{bit_position};"
 
 
-def render_full_header(metadata: DeviceMetadata) -> str:
+def render_full_header(
+    metadata: DeviceMetadata, bit_name_format: str = DEFAULT_BIT_NAME_FORMAT
+) -> str:
     lines = _render_header_prelude(metadata)
-    sfr_lines = _render_sfr_section(metadata)
+    # One device-wide set of emitted *sanitized* C identifiers, shared by the SFR and bit
+    # sections. A `char` and a `bit` that sanitize to the same identifier collide just as two
+    # chars do, so the dedup must span both sections, not live in each one (audit: identifiers
+    # collide after sanitization — including across the register/bit namespaces).
+    emitted_ids: set[str] = set()
+    sfr_lines = _render_sfr_section(metadata, emitted_ids)
     if sfr_lines:
         lines.extend(sfr_lines)
         lines.append("")
         lines.append("")
-    bit_lines = _render_bit_section(metadata)
+    bit_lines = _render_bit_section(metadata, emitted_ids, bit_name_format)
     if bit_lines:
         lines.extend(bit_lines)
         lines.append("")

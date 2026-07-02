@@ -143,10 +143,26 @@ export function ipecmdPath(): string {
   return config().get<string>('ipecmdPath', '').trim();
 }
 
+/** Configured command timeout in seconds; 0 disables. */
+export function commandTimeoutSeconds(): number {
+  const seconds = config().get<number>('commandTimeoutSeconds', 300);
+  return seconds > 0 ? seconds : 0;
+}
+
 /** Timeout (ms) before a spawned helper/IPECMD child is killed; 0 disables. */
 export function commandTimeoutMs(): number {
-  const seconds = config().get<number>('commandTimeoutSeconds', 300);
-  return seconds > 0 ? seconds * 1000 : 0;
+  return commandTimeoutSeconds() * 1000;
+}
+
+/**
+ * Args that thread the configured command timeout into a generated/resolved task command, so a
+ * VS Code task (which the extension does not spawn through {@link runHelper} and therefore cannot
+ * kill on a timeout) is bounded by the helper's own ``--timeout-seconds`` instead of hanging the
+ * toolchain forever. Empty when the timeout is disabled.
+ */
+export function timeoutArgs(): string[] {
+  const seconds = commandTimeoutSeconds();
+  return seconds > 0 ? ['--timeout-seconds', String(seconds)] : [];
 }
 
 /**

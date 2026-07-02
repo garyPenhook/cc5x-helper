@@ -9,6 +9,8 @@ from .packs import normalize_device_name
 
 
 SUPPORTED_HEADER_MODES = {"generated", "supplied", "existing"}
+SUPPORTED_BIT_NAME_FORMATS = {"combined", "long", "short"}
+DEFAULT_BIT_NAME_FORMAT = "combined"
 DEFAULT_PROJECT_VERSION = 1
 
 
@@ -29,6 +31,7 @@ class ProjectFile:
     header_path: str
     config_source: str
     main_source: str
+    header_bit_name_format: str = DEFAULT_BIT_NAME_FORMAT
     base_build_options: list[str] = field(default_factory=list)
     editions: dict[str, ProjectEdition] = field(default_factory=dict)
     mplab_root: str | None = None
@@ -38,16 +41,19 @@ class ProjectFile:
     debug: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        header_payload: dict[str, object] = {
+            "mode": self.header_mode,
+            "path": self.header_path,
+        }
+        if self.header_bit_name_format != DEFAULT_BIT_NAME_FORMAT:
+            header_payload["bit_name_format"] = self.header_bit_name_format
         payload: dict[str, object] = {
             "version": self.version,
             "device": self.device,
             "compiler": self.compiler,
             "runner": self.runner,
             "mplab_root": self.mplab_root,
-            "header": {
-                "mode": self.header_mode,
-                "path": self.header_path,
-            },
+            "header": header_payload,
             "config_source": self.config_source,
             "main_source": self.main_source,
             "build_options": list(self.base_build_options),
@@ -72,6 +78,7 @@ def default_project_manifest(
     config_source: str | None = None,
     header_mode: str = "generated",
     header_path: str | None = None,
+    header_bit_name_format: str = DEFAULT_BIT_NAME_FORMAT,
     mplab_root: str | None = None,
 ) -> ProjectFile:
     normalized = normalize_device_name(device)
@@ -85,6 +92,7 @@ def default_project_manifest(
         runner=runner,
         header_mode=header_mode,
         header_path=header_path or f"generated_headers/{short_name}.H",
+        header_bit_name_format=header_bit_name_format,
         config_source=config_source or main_source,
         main_source=main_source,
         base_build_options=[],
@@ -190,6 +198,10 @@ def load_project_file(path: Path) -> ProjectFile:
     if isinstance(version, bool) or not isinstance(version, int):
         raise ValueError(f"{path}: field 'version' must be an integer, got {type(version).__name__}")
     header_mode = _optional_str(header.get("mode"), "'header.mode'", path) or "generated"
+    header_bit_name_format = (
+        _optional_str(header.get("bit_name_format"), "'header.bit_name_format'", path)
+        or DEFAULT_BIT_NAME_FORMAT
+    )
     debug_section = payload.get("debug")
     if debug_section is not None and not isinstance(debug_section, dict):
         raise ValueError(f"{path}: 'debug' must be an object")
@@ -200,6 +212,7 @@ def load_project_file(path: Path) -> ProjectFile:
         runner=_optional_str(payload.get("runner"), "'runner'", path),
         header_mode=header_mode,
         header_path=_optional_str(header["path"], "'header.path'", path),
+        header_bit_name_format=header_bit_name_format,
         config_source=_require_str(payload, "config_source", path),
         main_source=_require_str(payload, "main_source", path),
         base_build_options=_as_str_list(payload.get("build_options"), "'build_options'", path),
@@ -225,6 +238,11 @@ def validate_project_file(project: ProjectFile) -> list[str]:
     if project.header_mode not in SUPPORTED_HEADER_MODES:
         errors.append(
             f"unsupported header.mode {project.header_mode!r}; expected one of {sorted(SUPPORTED_HEADER_MODES)}"
+        )
+    if project.header_bit_name_format not in SUPPORTED_BIT_NAME_FORMATS:
+        errors.append(
+            f"unsupported header.bit_name_format {project.header_bit_name_format!r}; "
+            f"expected one of {sorted(SUPPORTED_BIT_NAME_FORMATS)}"
         )
     if not project.device.startswith(("PIC10F", "PIC12F", "PIC16F")):
         errors.append("device must be a CC5X-target PIC10F/PIC12F/PIC16F part")
@@ -328,16 +346,19 @@ def update_project_edition_build_options(
 
 
 def project_summary(project: ProjectFile) -> dict[str, object]:
+    header: dict[str, object] = {
+        "mode": project.header_mode,
+        "path": project.header_path,
+    }
+    if project.header_bit_name_format != DEFAULT_BIT_NAME_FORMAT:
+        header["bit_name_format"] = project.header_bit_name_format
     return {
         "version": project.version,
         "device": project.device,
         "compiler": project.compiler,
         "runner": project.runner,
         "mplab_root": project.mplab_root,
-        "header": {
-            "mode": project.header_mode,
-            "path": project.header_path,
-        },
+        "header": header,
         "config_source": project.config_source,
         "main_source": project.main_source,
         "build_options": list(project.base_build_options),
@@ -360,6 +381,7 @@ def update_project_fields(
     mplab_root: str | None = None,
     header_mode: str | None = None,
     header_path: str | None = None,
+    header_bit_name_format: str | None = None,
     config_source: str | None = None,
     main_source: str | None = None,
     clear_runner: bool = False,
@@ -373,6 +395,11 @@ def update_project_fields(
         mplab_root=None if clear_mplab_root else (mplab_root if mplab_root is not None else project.mplab_root),
         header_mode=header_mode if header_mode is not None else project.header_mode,
         header_path=header_path if header_path is not None else project.header_path,
+        header_bit_name_format=(
+            header_bit_name_format
+            if header_bit_name_format is not None
+            else project.header_bit_name_format
+        ),
         config_source=config_source if config_source is not None else project.config_source,
         main_source=main_source if main_source is not None else project.main_source,
     )

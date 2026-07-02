@@ -78,6 +78,22 @@ class ProjectFileTests(unittest.TestCase):
             self.assertEqual(loaded.header_mode, "existing")
             self.assertEqual(loaded.header_path, "include/12F1840.H")
 
+    def test_header_bit_name_format_round_trips_when_non_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "setcc-native.json"
+            project = default_project_manifest(
+                device="PIC16F1509",
+                compiler="/compiler/CC5X.EXE",
+                runner=None,
+                main_source="app.c",
+                header_bit_name_format="long",
+            )
+            write_project_file(project, path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["header"]["bit_name_format"], "long")
+            loaded = load_project_file(path)
+            self.assertEqual(loaded.header_bit_name_format, "long")
+
     def test_debug_section_survives_round_trip(self) -> None:
         # Regression: a hand-added "debug" section must not be erased when a mutation
         # command rewrites the manifest (load -> to_dict -> write).
@@ -299,6 +315,7 @@ class ProjectFileTests(unittest.TestCase):
             header_path="include/12F1840.H",
             config_source="cfg.c",
             main_source="src/main.c",
+            header_bit_name_format="long",
             clear_runner=True,
             mplab_root="/opt/microchip/mplabx",
         )
@@ -307,6 +324,7 @@ class ProjectFileTests(unittest.TestCase):
         self.assertIsNone(project.runner)
         self.assertEqual(project.header_mode, "existing")
         self.assertEqual(project.header_path, "include/12F1840.H")
+        self.assertEqual(project.header_bit_name_format, "long")
         self.assertEqual(project.config_source, "cfg.c")
         self.assertEqual(project.main_source, "src/main.c")
         self.assertEqual(project.mplab_root, "/opt/microchip/mplabx")

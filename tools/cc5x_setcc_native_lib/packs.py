@@ -529,7 +529,11 @@ def find_device_in_unpacked_packs(
                     search_dir = version_dir / rel_dir
                     if not search_dir.exists():
                         continue
-                    for filename in filenames:
+                    # Iterate candidates in a stable (sorted) order: ``filenames`` is a set, so
+                    # set iteration order varies with the hash seed across runs, which could let
+                    # two same-suffix candidates in one dir fill a slot nondeterministically
+                    # (audit: metadata nondeterminism).
+                    for filename in sorted(filenames):
                         candidate = search_dir / filename
                         if not candidate.exists():
                             continue

@@ -16,6 +16,8 @@ from typing import Iterable
 
 try:
     from cc5x_setcc_native_lib.headergen import (
+        BIT_NAME_FORMATS,
+        DEFAULT_BIT_NAME_FORMAT,
         render_dynamic_config_section,
         render_full_header,
     )
@@ -56,6 +58,8 @@ try:
 except ModuleNotFoundError:
     from tools.cc5x_setcc_native_lib.fsutil import atomic_write_text
     from tools.cc5x_setcc_native_lib.headergen import (
+        BIT_NAME_FORMATS,
+        DEFAULT_BIT_NAME_FORMAT,
         render_dynamic_config_section,
         render_full_header,
     )
@@ -676,6 +680,28 @@ IPECMD_ACTIONS_NEEDING_IMAGE = ("program", "verify")
 # running (audit): the interactive GUI/extension pass --yes after their own modal warning,
 # while a generated terminal task (which has no modal) must prompt the user to type 'yes'.
 DESTRUCTIVE_PROGRAM_ACTIONS = ("program", "erase")
+# Flag classes that raw --ipe-arg passthrough must NOT smuggle in: the operation (-M/-Y/-E/-C),
+# the device (-P), the programmer tool (-TP), and the image (-F) are all chosen by
+# --action/--device/--tool/--hex and the destructive-action confirmation is keyed on --action.
+# Without this gate, `program --action verify --ipe-arg=-E` would erase the chip with no prompt
+# (verify is non-destructive, so it bypasses the confirmation). Matched as prefixes so a flag's
+# value/mode suffix (e.g. `-PPIC16F1509`, `-MP`) is caught too (audit: raw --ipe-arg bypass).
+IPECMD_RESERVED_ARG_PREFIXES = ("-M", "-Y", "-E", "-C", "-P", "-TP", "-F")
+
+
+def reject_reserved_ipe_args(extra_args: list[str]) -> None:
+    """Reject any raw IPECMD argument that overrides the operation/device/tool/image."""
+    for arg in extra_args:
+        token = arg.strip()
+        match = next(
+            (prefix for prefix in IPECMD_RESERVED_ARG_PREFIXES if token.startswith(prefix)), None
+        )
+        if match is not None:
+            raise SystemExit(
+                f"--ipe-arg {arg!r} is not allowed: the {match} flag class "
+                "(operation/device/tool/image) is controlled by --action/--device/--tool/--hex "
+                "and gated by the write confirmation. Use those options instead."
+            )
 
 
 def discover_ipecmd() -> Path | None:
@@ -723,7 +749,9 @@ def ipecmd_command(
     command.append(IPECMD_ACTION_FLAG[action])
     if release_from_reset:
         command.append("-OL")  # release target from reset after the operation
-    command.extend(extra_args or [])
+    extra_args = extra_args or []
+    reject_reserved_ipe_args(extra_args)
+    command.extend(extra_args)
     return command
 
 
@@ -812,6 +840,37 @@ def project_path_join(project_path: Path, value: str) -> Path:
     if path.is_absolute():
         return path
     return (project_path.parent / path).resolve()
+
+
+# Opt-out for the write-path containment check below. A manifest is data; absent this gate a
+# malicious or careless `header.path`/`config_source` (an absolute path or a `../../` escape)
+# would let `build`/`sync-config` clobber files anywhere the user can write. Reads stay lenient
+# (project_path_join); only writes are constrained, with an explicit env escape hatch.
+ALLOW_OUTSIDE_WRITES_ENV = "CC5X_HELPER_ALLOW_OUTSIDE_WRITES"
+
+
+def project_write_path_join(project_path: Path, value: str, *, what: str = "output path") -> Path:
+    """Resolve a manifest-relative *write* target, refusing to escape the project directory.
+
+    Unlike :func:`project_path_join` (used for reads, which tolerate absolute paths and ``..``),
+    a path the helper is about to **write** must stay inside the manifest's own directory: a
+    generated header or synced config block is the manifest's output, and a manifest must not be
+    able to overwrite arbitrary files elsewhere on disk. Set ``$CC5X_HELPER_ALLOW_OUTSIDE_WRITES``
+    to permit an intentional out-of-tree target.
+    """
+    base = project_path.parent.resolve()
+    candidate = Path(value).expanduser()
+    resolved = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+    if os.environ.get(ALLOW_OUTSIDE_WRITES_ENV):
+        return resolved
+    if not resolved.is_relative_to(base):
+        raise SystemExit(
+            f"refusing to write {what} outside the project directory: {resolved}\n"
+            f"  project directory: {base}\n"
+            f"  the manifest value was: {value!r}\n"
+            f"  set {ALLOW_OUTSIDE_WRITES_ENV}=1 to allow an out-of-tree target."
+        )
+    return resolved
 
 
 DEFAULT_PROJECT_MANIFEST = "setcc-native.json"
@@ -933,10 +992,33 @@ def resolve_supplied_header(project_path: Path, project) -> Path:
     raise SystemExit(f"supplied header not found: {manifest_header_path}")
 
 
-def ensure_project_header(project_path: Path, project) -> Path:
+def resolve_project_header_path(project_path: Path, project) -> Path:
+    """Resolve the header path a build uses, **without** generating or writing it.
+
+    Supplied mode locates the compiler-shipped header; existing mode returns the manifest path
+    (and requires it to exist); generated mode constrains the path to the project directory via
+    :func:`project_write_path_join` — the SAME resolution :func:`ensure_project_header` applies
+    before writing. Resolving identically here means a ``--dry-run`` preview shows (and a
+    readiness check that calls this sees) the exact path and the exact containment error the real
+    build would, instead of a lenient path that diverges from the write (audit: dry-run mutated
+    headers / dry-run vs build divergence). This itself never touches the filesystem.
+    """
     if project.header_mode == "supplied":
         return resolve_supplied_header(project_path, project)
+    if project.header_mode == "generated":
+        # A generated header is the manifest's output: constrain it to the project directory so
+        # a hostile/careless header.path cannot clobber files elsewhere (audit: manifest paths).
+        return project_write_path_join(
+            project_path, project.header_path, what="generated header"
+        )
     header_path = project_path_join(project_path, project.header_path)
+    if header_path.exists():
+        return header_path
+    raise SystemExit(f"existing header not found: {header_path}")
+
+
+def ensure_project_header(project_path: Path, project) -> Path:
+    header_path = resolve_project_header_path(project_path, project)
     if project.header_mode == "generated":
         rendered = render_project_generated_header(project)
         header_path.parent.mkdir(parents=True, exist_ok=True)
@@ -944,17 +1026,17 @@ def ensure_project_header(project_path: Path, project) -> Path:
         # header to zero. atomic_write_text encodes before touching the destination, so a bad
         # pack description fails the write whole rather than leaving a clobbered file.
         atomic_write_text(header_path, rendered, encoding="latin-1")
-        return header_path
-    if header_path.exists():
-        return header_path
-    raise SystemExit(f"existing header not found: {header_path}")
+    return header_path
 
 
 def render_project_generated_header(project) -> str:
     """Render a generated-mode project header without writing it to disk."""
     _, metadata = project_metadata(project)
     try:
-        return render_full_header(metadata)
+        return render_full_header(
+            metadata,
+            bit_name_format=getattr(project, "header_bit_name_format", DEFAULT_BIT_NAME_FORMAT),
+        )
     except ValueError as exc:
         # headergen rejects malformed pack metadata (e.g. an unsupported architecture);
         # surface it as a build-stopping error rather than a traceback (audit #6).
@@ -1144,7 +1226,7 @@ def cmd_render_pack_header(args: argparse.Namespace) -> int:
         cfgdata_reference=result.get("pack_cfgdata") or result.get("cfgdata"),
         pic_reference=result.get("pic"),
     )
-    sys.stdout.write(render_full_header(metadata))
+    sys.stdout.write(render_full_header(metadata, bit_name_format=args.bit_name_format))
     return 0
 
 
@@ -1263,7 +1345,11 @@ def cmd_sync_config(args: argparse.Namespace) -> int:
             symbols=symbols,
             settings=merged,
         )
-        source_path = project_path_join(project_path, project.config_source)
+        # sync-config rewrites the file: constrain the target to the project directory so a
+        # manifest cannot redirect the managed block into an arbitrary file (audit: manifest paths).
+        source_path = project_write_path_join(
+            project_path, project.config_source, what="config source"
+        )
         original = source_path.read_text(encoding="latin-1")
         updated, replaced = update_managed_block(original, block, family)
         atomic_write_text(source_path, updated)
@@ -1421,15 +1507,26 @@ def _finish_build(command: list[str], run_cwd: object, args: argparse.Namespace)
     return completed.returncode
 
 
-def _prepare_project_build(args: argparse.Namespace) -> tuple[list[str], object]:
-    """Resolve the build command + working dir for a manifest project (may raise SystemExit)."""
-    project_path, project, edition = load_project_and_edition(args.project, args.edition)
+def prepare_project_build_command(
+    project_path: Path, project, edition, *, dry_run: bool
+) -> tuple[list[str], Path]:
+    """Resolve ``(command, run_cwd)`` for a manifest build (may raise SystemExit).
+
+    Shared by the CLI (:func:`_prepare_project_build`) and the GUI so both run the same
+    readiness checks and the same dry-run policy. A real build writes the generated header via
+    :func:`ensure_project_header`; a ``dry_run`` preview only *resolves* the header path so it
+    never mutates the filesystem (audit: dry-run mutated generated headers).
+    """
     build_errors = project_build_readiness_errors(project_path, project)
     if build_errors:
         raise SystemExit(
             f"project is not ready to build {project_path}:\n- " + "\n- ".join(build_errors)
         )
-    header_path = ensure_project_header(project_path, project)
+    header_path = (
+        resolve_project_header_path(project_path, project)
+        if dry_run
+        else ensure_project_header(project_path, project)
+    )
     runner = shlex.split(project.runner) if project.runner else []
     source_path = project_path_join(project_path, project.main_source)
     options = build_options_for_project(project, edition, header_path)
@@ -1440,6 +1537,14 @@ def _prepare_project_build(args: argparse.Namespace) -> tuple[list[str], object]
         runner=runner,
     )
     return command, source_path.parent
+
+
+def _prepare_project_build(args: argparse.Namespace) -> tuple[list[str], object]:
+    """Resolve the build command + working dir for a manifest project (may raise SystemExit)."""
+    project_path, project, edition = load_project_and_edition(args.project, args.edition)
+    return prepare_project_build_command(
+        project_path, project, edition, dry_run=bool(getattr(args, "dry_run", False))
+    )
 
 
 def _prepare_standalone_build(args: argparse.Namespace) -> tuple[list[str], object]:
@@ -1765,7 +1870,9 @@ def cmd_program(args: argparse.Namespace) -> int:
                 command,
                 capture_output=True,
                 text=True,
-                errors="replace",  # IPECMD output may contain non-UTF-8 bytes; never raise UnicodeDecodeError past the JSON boundary
+                # IPECMD output may contain non-UTF-8 bytes; do not let that escape the
+                # JSON boundary as a UnicodeDecodeError.
+                errors="replace",
                 timeout=_timeout_seconds(args),
             )
             payload["stdout"] = completed.stdout
@@ -1825,6 +1932,29 @@ def cmd_program(args: argparse.Namespace) -> int:
 CC5X_TASK_LABEL_PREFIX = "CC5X:"
 
 
+def _vscode_build_matcher(problem_matcher: object, manifest: str, main_source: str) -> object:
+    """Re-root a named problem matcher at the build's source directory.
+
+    Generated build tasks run CC5X from the main-source directory (matching the CLI), so CC5X's
+    relative diagnostic paths are relative to THAT directory, not ``${workspaceFolder}``. The
+    contributed ``$cc5x`` matcher's ``fileLocation`` base is ``${workspaceFolder}``, which would
+    pin diagnostics for a nested ``src/main.c`` onto the wrong file (audit: problem-matcher root).
+    Override ``fileLocation`` via the matcher's ``base`` inheritance so it resolves against the
+    source dir. A non-string matcher (a list, or empty) is left untouched.
+    """
+    if not isinstance(problem_matcher, str) or not problem_matcher:
+        return problem_matcher
+    rel = os.path.normpath(os.path.join(os.path.dirname(manifest), os.path.dirname(main_source)))
+    if os.path.isabs(rel):
+        base_dir: str = rel
+    elif rel in ("", "."):
+        # Source dir == workspace folder: the contributed base is already correct.
+        return problem_matcher
+    else:
+        base_dir = "${workspaceFolder}/" + rel.replace(os.sep, "/")
+    return {"base": problem_matcher, "fileLocation": ["autoDetect", base_dir]}
+
+
 def generate_vscode_tasks(
     project,
     manifest: str,
@@ -1832,24 +1962,42 @@ def generate_vscode_tasks(
     helper: str,
     tool: str,
     problem_matcher: object,
+    timeout_seconds: float = 0.0,
 ) -> list[dict[str, object]]:
     """Build the list of CC5X VS Code task definitions for a project manifest.
 
     One build task per edition (the first is the default build task), each paired with a
     program/verify task that runs after it, plus device-level erase and blank-check tasks.
     Tasks use ``type: process`` so args are passed without shell quoting.
+
+    ``timeout_seconds`` (when > 0) is threaded into every build/program command as
+    ``--timeout-seconds`` so a task cannot hang the toolchain indefinitely the way the
+    extension's own spawned commands are already bounded (audit: VS Code task hang).
     """
     cwd = "${workspaceFolder}"
     presentation = {"reveal": "always", "panel": "shared", "group": "cc5x"}
+    timeout_args = (
+        ["--timeout-seconds", _format_seconds(timeout_seconds)]
+        if timeout_seconds and timeout_seconds > 0
+        else []
+    )
+    build_matcher = _vscode_build_matcher(
+        problem_matcher, manifest, getattr(project, "main_source", "") or ""
+    )
 
-    def helper_task(label: str, helper_args: list[str], extra: dict[str, object]) -> dict[str, object]:
+    def helper_task(
+        label: str,
+        helper_args: list[str],
+        extra: dict[str, object],
+        matcher: object = problem_matcher,
+    ) -> dict[str, object]:
         task: dict[str, object] = {
             "label": label,
             "type": "process",
             "command": python,
             "args": [helper, *helper_args],
             "options": {"cwd": cwd},
-            "problemMatcher": problem_matcher,
+            "problemMatcher": matcher,
             "presentation": presentation,
         }
         task.update(extra)
@@ -1862,14 +2010,18 @@ def generate_vscode_tasks(
         tasks.append(
             helper_task(
                 build_label,
-                ["build", "--project", manifest, "--edition", edition],
+                ["build", "--project", manifest, "--edition", edition, *timeout_args],
                 {"group": {"kind": "build", "isDefault": index == 0}},
+                matcher=build_matcher,
             )
         )
         tasks.append(
             helper_task(
                 f"{CC5X_TASK_LABEL_PREFIX} Program {edition} ({tool})",
-                ["program", "--project", manifest, "--edition", edition, "--tool", tool],
+                [
+                    "program", "--project", manifest, "--edition", edition,
+                    "--tool", tool, *timeout_args,
+                ],
                 {"dependsOn": build_label, "dependsOrder": "sequence"},
             )
         )
@@ -1878,7 +2030,7 @@ def generate_vscode_tasks(
                 f"{CC5X_TASK_LABEL_PREFIX} Verify {edition} ({tool})",
                 [
                     "program", "--action", "verify",
-                    "--project", manifest, "--edition", edition, "--tool", tool,
+                    "--project", manifest, "--edition", edition, "--tool", tool, *timeout_args,
                 ],
                 {"dependsOn": build_label, "dependsOrder": "sequence"},
             )
@@ -1887,14 +2039,17 @@ def generate_vscode_tasks(
     tasks.append(
         helper_task(
             f"{CC5X_TASK_LABEL_PREFIX} Erase ({tool})",
-            ["program", "--action", "erase", "--project", manifest, "--tool", tool],
+            ["program", "--action", "erase", "--project", manifest, "--tool", tool, *timeout_args],
             {},
         )
     )
     tasks.append(
         helper_task(
             f"{CC5X_TASK_LABEL_PREFIX} Blank Check ({tool})",
-            ["program", "--action", "blank-check", "--project", manifest, "--tool", tool],
+            [
+                "program", "--action", "blank-check",
+                "--project", manifest, "--tool", tool, *timeout_args,
+            ],
             {},
         )
     )
@@ -2001,6 +2156,7 @@ def cmd_vscode_tasks(args: argparse.Namespace) -> int:
         helper=args.helper,
         tool=args.tool,
         problem_matcher=problem_matcher,
+        timeout_seconds=getattr(args, "timeout_seconds", 0) or 0,
     )
 
     output = Path(args.output) if args.output else project_path.parent / ".vscode" / "tasks.json"
@@ -2075,6 +2231,7 @@ def cmd_project_init(args: argparse.Namespace) -> int:
         config_source=args.config_source,
         header_mode=args.header_mode,
         header_path=args.header_path,
+        header_bit_name_format=args.bit_name_format,
         mplab_root=args.mplab_root,
     )
     write_project_file(project, project_path)
@@ -2229,6 +2386,7 @@ def cmd_project_edit(args: argparse.Namespace) -> int:
         mplab_root=args.mplab_root,
         header_mode=args.header_mode,
         header_path=args.header_path,
+        header_bit_name_format=args.bit_name_format,
         config_source=args.config_source,
         main_source=args.main_source,
         clear_runner=args.clear_runner,
@@ -2673,6 +2831,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="generated",
     )
     project_init.add_argument("--header-path")
+    project_init.add_argument(
+        "--bit-name-format",
+        choices=sorted(BIT_NAME_FORMATS),
+        default=DEFAULT_BIT_NAME_FORMAT,
+        help=(
+            "Generated-header bit names: combined (current/default), long "
+            "REGISTER_BIT, or short BIT."
+        ),
+    )
     project_init.add_argument("--force", action="store_true")
     project_init.set_defaults(func=cmd_project_init)
 
@@ -2699,6 +2866,11 @@ def build_parser() -> argparse.ArgumentParser:
     project_edit.add_argument("--clear-mplab-root", action="store_true")
     project_edit.add_argument("--header-mode", choices=["generated", "supplied", "existing"])
     project_edit.add_argument("--header-path")
+    project_edit.add_argument(
+        "--bit-name-format",
+        choices=sorted(BIT_NAME_FORMATS),
+        help="Generated-header bit names: combined, long REGISTER_BIT, or short BIT.",
+    )
     project_edit.add_argument("--config-source")
     project_edit.add_argument("--main-source")
     project_edit.set_defaults(func=cmd_project_edit)
@@ -2849,6 +3021,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     render_header.add_argument("--device", required=True)
     render_header.add_argument("--mplab-root")
+    render_header.add_argument(
+        "--bit-name-format",
+        choices=sorted(BIT_NAME_FORMATS),
+        default=DEFAULT_BIT_NAME_FORMAT,
+        help=(
+            "Generated-header bit names: combined (current/default), long "
+            "REGISTER_BIT, or short BIT."
+        ),
+    )
     render_header.set_defaults(func=cmd_render_pack_header)
 
     list_pack_config = subparsers.add_parser(
@@ -3010,6 +3191,12 @@ def build_parser() -> argparse.ArgumentParser:
     vscode_tasks.add_argument(
         "--problem-matcher",
         help="Problem matcher name for build tasks (default: none). E.g. $cc5x if the extension defines it.",
+    )
+    vscode_tasks.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=0,
+        help="Embed --timeout-seconds in generated build/program tasks (0 omits it; default).",
     )
     vscode_tasks.add_argument("--output", help="Output path (default: <manifest dir>/.vscode/tasks.json).")
     vscode_tasks.add_argument("--stdout", action="store_true", help="Print instead of writing the file.")

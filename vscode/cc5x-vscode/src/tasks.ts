@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { helperPath, manifestAbsPath, pythonPath } from './helper';
+import { helperPath, manifestAbsPath, pythonPath, timeoutArgs } from './helper';
 
 interface Cc5xTaskDefinition extends vscode.TaskDefinition {
   action: 'build';
@@ -29,7 +29,9 @@ function buildExecution(
       : manifestAbsPath(root);
   return new vscode.ProcessExecution(
     pythonPath(),
-    [helperPath(root), 'build', '--project', manifest, '--edition', edition],
+    // Bound the build with the configured timeout: a resolved task runs outside runHelper's
+    // watchdog, so without --timeout-seconds a hung compiler/Wine child runs forever.
+    [helperPath(root), 'build', '--project', manifest, '--edition', edition, ...timeoutArgs()],
     { cwd: root.uri.fsPath },
   );
 }

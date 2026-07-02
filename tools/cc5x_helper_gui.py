@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import inspect
 import os
-import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -22,7 +22,7 @@ if sys.platform.startswith("linux"):
     os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
 
 try:
-    from PyQt6.QtCore import QObject, QProcess, Qt, pyqtSignal
+    from PyQt6.QtCore import QObject, QProcess, Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import (
         QApplication,
@@ -57,9 +57,7 @@ try:
     from cc5x_setcc_native import (
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
-        build_command,
         atomic_write_text,
-        build_options_for_project,
         default_pack_symbol_values,
         merged_device_list,
         ensure_project_header,
@@ -68,8 +66,10 @@ try:
         load_project_and_edition,
         pack_config_symbols,
         parse_key_value_pairs,
+        prepare_project_build_command,
         project_metadata,
         project_path_join,
+        project_write_path_join,
         render_config_block_from_symbols,
         render_full_header,
         update_managed_block,
@@ -93,9 +93,7 @@ except ModuleNotFoundError:
     from tools.cc5x_setcc_native import (
         DEFAULT_COMPILER,
         DEFAULT_RUNNER,
-        build_command,
         atomic_write_text,
-        build_options_for_project,
         default_pack_symbol_values,
         merged_device_list,
         ensure_project_header,
@@ -104,8 +102,10 @@ except ModuleNotFoundError:
         load_project_and_edition,
         pack_config_symbols,
         parse_key_value_pairs,
+        prepare_project_build_command,
         project_metadata,
         project_path_join,
+        project_write_path_join,
         render_config_block_from_symbols,
         render_full_header,
         update_managed_block,
@@ -1040,6 +1040,13 @@ class ProjectTab(QWidget):
         super().__init__()
         self.open_help = open_help
         self.process: QProcess | None = None
+        # Single-shot watchdog: kills a build that outruns the timeout so a hung compiler/Wine
+        # child cannot block the UI forever, mirroring the CLI/extension timeout (audit: GUI
+        # build can hang indefinitely).
+        self.build_timer: QTimer | None = None
+        # Set per build: True when the child was started in its own session, so a cancel/close
+        # can signal the whole process group rather than just the direct child.
+        self._proc_is_session_leader = False
         # Buttons that mutate project state or files a running build depends on; these
         # are disabled while a build is in flight so the user cannot race the QProcess.
         self._build_lock_buttons: list[QPushButton] = []
@@ -1614,7 +1621,11 @@ class ProjectTab(QWidget):
             symbols=symbols,
             settings=settings,
         )
-        source_path = project_path_join(project_path, project.config_source)
+        # Same containment as the CLI sync-config: a rewrite target must stay inside the
+        # project directory (audit: manifest paths can write outside the project).
+        source_path = project_write_path_join(
+            project_path, project.config_source, what="config source"
+        )
         if not source_path.is_file():
             raise SystemExit(
                 f"config source not found: {source_path}\n"
@@ -1635,14 +1646,32 @@ class ProjectTab(QWidget):
     def build_project(self) -> None:
         self._run_build(dry_run=False)
 
+    @staticmethod
+    def _build_timeout_ms() -> int:
+        """Build watchdog in milliseconds; ``CC5X_HELPER_BUILD_TIMEOUT_SECONDS`` sets it.
+
+        Defaults to 0 (no watchdog), matching the CLI ``build --timeout-seconds`` default so an
+        identical project that compiles on the CLI is never killed mid-build in the GUI. A long
+        build is still recoverable here because Cancel/close now reap the whole process tree;
+        set this env var to a positive number of seconds to opt into an automatic timeout.
+        """
+        raw = os.environ.get("CC5X_HELPER_BUILD_TIMEOUT_SECONDS")
+        if raw is None:
+            return 0
+        try:
+            seconds = float(raw)
+        except ValueError:
+            return 0
+        return int(seconds * 1000) if seconds > 0 else 0
+
     def _run_build(self, dry_run: bool) -> None:
         project_path, project, edition = load_project_and_edition(str(self.project_path()), self.current_edition())
-        header_path = ensure_project_header(project_path, project)
-        command = build_command(
-            compiler=project.compiler,
-            main_file=str(project_path_join(project_path, project.main_source)),
-            options=build_options_for_project(project, edition, header_path),
-            runner=(shlex.split(project.runner) if project.runner else []),
+        # Reuse the CLI build preparation so the GUI runs the same readiness checks and the same
+        # dry-run policy (a dry run only resolves the header path; it must not regenerate/write
+        # it). This closed two GUI/CLI divergences: skipped readiness validation and a dry run
+        # that mutated the generated header (audit: GUI diverges from CLI; dry-run mutates header).
+        command, run_cwd = prepare_project_build_command(
+            project_path, project, edition, dry_run=dry_run
         )
         if dry_run:
             self.output.write_text("command: " + subprocess.list2cmdline(command))
@@ -1653,13 +1682,19 @@ class ProjectTab(QWidget):
         # later build cannot make these slots read a different process.
         proc = QProcess(self)
         self.process = proc
+        # Start the build in its own session so a runner that spawns the real compiler
+        # (Wine/CrossOver -> CC5X.EXE) can be torn down as a whole process group on cancel or
+        # window close — QProcess.kill() alone reaches only the direct child and orphans the
+        # rest (audit: cancel/close orphans compiler children). POSIX-only; harmless elsewhere.
+        self._proc_is_session_leader = False
+        if sys.platform != "win32" and hasattr(proc, "setUnixProcessParameters"):
+            proc.setUnixProcessParameters(QProcess.UnixProcessFlag.CreateNewSession)
+            self._proc_is_session_leader = True
         proc.setProgram(command[0])
         proc.setArguments(command[1:])
-        # Run from the main source's directory, matching the CLI (_prepare_project_build uses
-        # source_path.parent). Using the manifest dir made nested projects resolve relative
-        # CC5X includes differently between the GUI and CLI (audit #7).
-        source_dir = project_path_join(project_path, project.main_source).parent
-        proc.setWorkingDirectory(str(source_dir))
+        # Run from the working dir the CLI uses (the main source's directory) so nested projects
+        # resolve relative CC5X includes identically in GUI and CLI (audit #7).
+        proc.setWorkingDirectory(str(run_cwd))
         proc.readyReadStandardOutput.connect(
             lambda: self.output.append_text(bytes(proc.readAllStandardOutput()).decode(errors="replace"))
         )
@@ -1673,6 +1708,50 @@ class ProjectTab(QWidget):
         self._set_build_running(True)
         self.output.write_text("command: " + subprocess.list2cmdline(command) + "\n\n")
         proc.start()
+        self._start_build_timer(proc)
+
+    def _start_build_timer(self, proc: QProcess) -> None:
+        # Never leave a previous watchdog armed (QTimer is parented to self and would otherwise
+        # outlive its build and fire against an unrelated process).
+        self._stop_build_timer()
+        timeout_ms = self._build_timeout_ms()
+        if timeout_ms <= 0:
+            self.build_timer = None
+            return
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda p=proc: self._on_build_timeout(p))
+        self.build_timer = timer
+        timer.start(timeout_ms)
+
+    def _stop_build_timer(self) -> None:
+        if self.build_timer is not None:
+            self.build_timer.stop()
+            self.build_timer = None
+
+    def _kill_process_tree(self, proc: QProcess) -> None:
+        """Kill the build process *and* its descendants (Wine/CrossOver/CC5X children).
+
+        The build runs in its own session (CreateNewSession), so the child is its own
+        process-group leader and a single group signal reaches the whole tree. Falls back to
+        ``QProcess.kill()`` when the group could not be isolated or is already gone.
+        """
+        pid = int(proc.processId())
+        if self._proc_is_session_leader and pid > 0 and hasattr(os, "killpg"):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # group already gone or not permitted; fall back to the direct kill.
+        proc.kill()
+
+    def _on_build_timeout(self, proc: QProcess) -> None:
+        # Watchdog fired: only act on the build still tracked as current and still running.
+        if self.process is not proc or proc.state() == QProcess.ProcessState.NotRunning:
+            return
+        self.output.append_text("\nbuild timed out; killing the process tree...\n")
+        # kill() makes the process emit finished(), so _on_build_finished re-enables controls.
+        self._kill_process_tree(proc)
 
     def _set_build_running(self, running: bool) -> None:
         for button in self._build_lock_buttons:
@@ -1686,14 +1765,16 @@ class ProjectTab(QWidget):
         if proc is None or proc.state() == QProcess.ProcessState.NotRunning:
             return
         self.output.append_text("\ncancelling build...\n")
-        # kill() makes the process emit finished(), so _on_build_finished re-enables controls.
-        proc.kill()
+        # kill the whole tree so a runner's compiler child is not orphaned; killing makes the
+        # process emit finished(), so _on_build_finished re-enables controls.
+        self._kill_process_tree(proc)
 
     def shutdown(self) -> None:
         """Kill an in-flight build so closing the window cannot orphan the child process."""
+        self._stop_build_timer()
         proc = self.process
         if proc is not None and proc.state() != QProcess.ProcessState.NotRunning:
-            proc.kill()
+            self._kill_process_tree(proc)
             proc.waitForFinished(2000)
 
     def _on_build_error(self, error: QProcess.ProcessError, proc: QProcess) -> None:
@@ -1707,6 +1788,7 @@ class ProjectTab(QWidget):
         # Idempotent: finished and a FailedToStart error can both reach here.
         if self.process is not proc:
             return
+        self._stop_build_timer()
         self.output.append_text(f"\nprocess exited with code {code}\n")
         self.process = None
         self._set_build_running(False)

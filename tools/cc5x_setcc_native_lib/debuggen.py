@@ -1230,6 +1230,8 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         "static uns8 cdl_rxn;",
         "static bit cdl_inframe;",
         "static bit cdl_rxesc;",
+        # Invalid escape seen -> drop the whole frame (mirrors cdl_codec's _bad flag).
+        "static bit cdl_rxbad;",
     ]
     if sw_bp:
         lines += ["static uns8 cdl_bp_mask;", "static uns8 cdl_cont_id;"]
@@ -1331,9 +1333,10 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         "    for (i = 0; i < len; i++) crc = cdl_crc8(crc, cdl_rx[3 + i]);",
         "    if (crc != cdl_rx[3 + len]) return; // bad CRC -> drop",
         "    if (type == CDL_T_PING) {",
+        "        if (len != 0) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // PING carries no args",
         "        cdl_ack(seq);",
         "    } else if (type == CDL_T_READ_MEM) {",
-        "        if (len < 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
+        "        if (len != 3) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // exact: addr_lo addr_hi count",
         "        cdl_read_mem(cdl_rx[3], cdl_rx[4], cdl_rx[5]);",
     ]
     if write_mem:
@@ -1345,17 +1348,17 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
     if sw_bp:
         lines += [
             "    } else if (type == CDL_T_SET_BP) {",
-            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len != 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // exact: one bp_id",
             f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}  // don't ACK a BP that can never fire",
             "        cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);",
             "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CLR_BP) {",
-            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len != 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // exact: one bp_id",
             f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}",
             "        cdl_bp_mask &= (cdl_bitmask(cdl_rx[3]) ^ 0xFF);",
             "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CONTINUE) {",
-            "        if (len < 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }",
+            "        if (len != 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // exact: one bp_id",
             "        cdl_cont_id = cdl_rx[3];",
             "        cdl_ack(seq);",
         ]
@@ -1391,15 +1394,23 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         lines += [
             "static void cdl_rx_byte(uns8 b) {",
             "    if (b == CDL_FLAG) {",
-            "        if (cdl_inframe && cdl_rxn > 0) cdl_dispatch();",
+            "        // Drop a frame poisoned by an invalid escape, or left with a dangling ESC at",
+            "        // the closing FLAG, instead of dispatching corrupt bytes (mirrors cdl_codec).",
+            "        if (cdl_inframe && cdl_rxn > 0 && !cdl_rxbad && !cdl_rxesc) cdl_dispatch();",
             "        cdl_rxn = 0;",
             "        cdl_inframe = 1;",
             "        cdl_rxesc = 0;",
+            "        cdl_rxbad = 0;",
             "        return;",
             "    }",
             "    if (!cdl_inframe) return;",
             "    if (b == CDL_ESC) { cdl_rxesc = 1; return; }",
-            "    if (cdl_rxesc) { b ^= CDL_ESC_XOR; cdl_rxesc = 0; }",
+            "    if (cdl_rxesc) {",
+            "        b ^= CDL_ESC_XOR;",
+            "        cdl_rxesc = 0;",
+            "        // Only FLAG/ESC are valid escaped bytes; anything else is malformed wire.",
+            "        if (b != CDL_FLAG && b != CDL_ESC) { cdl_rxbad = 1; return; }",
+            "    }",
             "    if (cdl_rxn < CDL_FRAME_MAX) cdl_rx[cdl_rxn++] = b;",
             "}",
             "",

@@ -23,7 +23,7 @@ It does not claim support for PIC18, because CC5X is not the target there.
 
 ## Compiler-Validated Devices
 
-Validated using [validate_generated_headers.py](/home/gary/apps/cc5x_paid/tools/validate_generated_headers.py) and the installed CrossOver bottle:
+Validated using [validate_generated_headers.py](tools/validate_generated_headers.py) and the installed CrossOver bottle:
 
 | Device | Family | Generated Header | Shipped Header Control | Result |
 |---|---|---:|---:|---|

@@ -427,6 +427,7 @@ uv run cc5x-helper vscode-tasks --project setcc-native.json --tool PK4
 | `runner` | Launcher for the Windows compiler (e.g. `wine {compiler}`; a bare interpreter needs the `{compiler}` placeholder) |
 | `header.mode` | `generated` (pack-derived), `supplied`, or `existing` |
 | `header.path` | Header file path used/produced for the build |
+| `header.bit_name_format` | Optional generated-header bit naming: `combined` (default), `long` (`REGISTER_BIT`), or `short` (`BIT`) |
 | `config_source` / `main_source` | File that receives synced config / the build entry point |
 | `build_options` | Extra CC5X flags applied to every edition |
 | `editions` | Named build variants, each with its own `config` map and `build_options` |
@@ -487,7 +488,7 @@ Compiler-validated generated headers currently exist for:
 
 - `PIC10F200`, `PIC10F320`, `PIC10F322`
 - `PIC12F1501`, `PIC12F1840`
-- `PIC16F1509`, `PIC16F15313`, `PIC16F1789`, `PIC16F18325`, `PIC16F18446`, `PIC16F18857`, `PIC16F19195`
+- `PIC16F1509`, `PIC16F15244`, `PIC16F15313`, `PIC16F1789`, `PIC16F18325`, `PIC16F18446`, `PIC16F18857`, `PIC16F19195`
 
 Validation uses the real `CC5X.EXE` under CrossOver/Wine.
 

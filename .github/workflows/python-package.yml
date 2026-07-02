@@ -8,6 +8,9 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  # Manual trigger so the real-toolchain validation job (which needs CC5X + CrossOver, only
+  # present on a self-hosted runner) can be kicked off on demand without blocking PR CI.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -61,6 +64,63 @@ jobs:
         QT_QPA_PLATFORM: offscreen
       run: |
         python -m pytest
+
+  package:
+    # Build the wheel + sdist and smoke-test the installed artifact. The matrix job above only
+    # installs in editable mode, which never exercises packaging: a missing package (e.g. the
+    # cc5x_setcc_native_lib subpackage dropped from the wheel) or a broken console-script entry
+    # point would ship green. This job is the gate that the distributable actually works.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Build sdist and wheel
+      run: |
+        python -m pip install --upgrade pip build
+        python -m build
+    - name: Install the built wheel into a clean venv and smoke-test it
+      run: |
+        python -m venv /tmp/wheeltest
+        # Install the wheel (not the source tree) so the test exercises exactly what is shipped.
+        /tmp/wheeltest/bin/pip install dist/*.whl
+        # Console script resolves and the top-level module imports its subpackage.
+        /tmp/wheeltest/bin/cc5x-helper --help > /dev/null
+        # The cc5x_setcc_native_lib subpackage must be present in the wheel, not just on the
+        # source tree — import it from the installed location to prove it was packaged.
+        /tmp/wheeltest/bin/python -c "import cc5x_setcc_native_lib.headergen, cc5x_setcc_native_lib.debuggen, cc5x_setcc_native_lib.packs"
+    - name: Validate the sdist contents
+      run: |
+        python -m pip install twine
+        # Fails on a malformed sdist/wheel (bad metadata, missing long-description render).
+        python -m twine check dist/*
+
+  cc5x-validation:
+    # Real-compiler validation: regenerate device headers with the actual CC5X toolchain and
+    # diff against the compiler-shipped headers. CC5X is a paid Windows compiler run under
+    # CrossOver, so this can only execute on a self-hosted runner that has the bottle installed.
+    # It is therefore manual (workflow_dispatch) and never gates PR CI; on a repo without such a
+    # runner the job simply stays unscheduled.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, cc5x]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+    - name: Doctor (toolchain present?)
+      run: uv run --frozen cc5x-helper doctor --json
+    - name: Validate generated headers against the CC5X-shipped headers
+      # The validator lives in the paid CC5X bottle's tooling, outside this repo; point at it via
+      # $CC5X_VALIDATE_SCRIPT on the self-hosted runner. Fail loudly if it is not configured
+      # rather than silently passing a no-op validation.
+      run: |
+        if [ -z "${CC5X_VALIDATE_SCRIPT:-}" ] || [ ! -f "${CC5X_VALIDATE_SCRIPT}" ]; then
+          echo "::error::CC5X_VALIDATE_SCRIPT is not set to an existing validate_generated_headers.py on this runner"
+          exit 1
+        fi
+        uv run --frozen python "${CC5X_VALIDATE_SCRIPT}"
 
   extension:
     # Build the VS Code companion extension under strict TypeScript so a broken

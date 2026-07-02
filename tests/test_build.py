@@ -247,6 +247,21 @@ class ProjectBuildReadinessTests(unittest.TestCase):
                 build.cmd_build(args)
         run.assert_not_called()
 
+    def test_dry_run_does_not_write_generated_header(self) -> None:
+        # A dry-run preview must not regenerate/write the header (audit: dry-run mutated headers).
+        self._write_manifest()
+        (self.dir / "app.c").write_text("void main(void){}\n", encoding="latin-1")
+        header = self.dir / "gen" / "16F1509.H"
+        project_path, project, edition = build.load_project_and_edition(
+            str(self.manifest), "production"
+        )
+        command, _cwd = build.prepare_project_build_command(
+            project_path, project, edition, dry_run=True
+        )
+        self.assertFalse(header.exists())
+        # The header's directory is still referenced as an include path in the command.
+        self.assertIn(f"-I{header.parent}", command)
+
 
 class UpdateManagedBlockTests(unittest.TestCase):
     """sync-config must replace only the managed block, never preceding user code."""
@@ -341,13 +356,16 @@ class ProjectGenerateHeaderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _write_manifest(self, mode: str = "generated") -> None:
+    def _write_manifest(self, mode: str = "generated", bit_name_format: str | None = None) -> None:
+        header = {"mode": mode, "path": "gen/16F1509.H"}
+        if bit_name_format is not None:
+            header["bit_name_format"] = bit_name_format
         manifest = {
             "version": 1,
             "device": "PIC16F1509",
             "compiler": str(self.compiler),
             "runner": None,
-            "header": {"mode": mode, "path": "gen/16F1509.H"},
+            "header": header,
             "config_source": "app.c",
             "main_source": "app.c",
             "build_options": [],
@@ -365,10 +383,11 @@ class ProjectGenerateHeaderTests(unittest.TestCase):
     def test_generates_header_for_generated_mode(self) -> None:
         self._write_manifest("generated")
         # Avoid touching real packs: stub metadata lookup + header render.
-        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, object())), \
+        metadata = object()
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, metadata)), \
                 unittest.mock.patch.object(
                     build, "render_full_header", return_value="#pragma chip PIC16F1509\n"
-                ):
+                ) as render:
             rc, payload = self._run()
         header = self.dir / "gen" / "16F1509.H"
         self.assertEqual(rc, 0)
@@ -376,6 +395,18 @@ class ProjectGenerateHeaderTests(unittest.TestCase):
         self.assertTrue(header.is_file())
         self.assertEqual(Path(payload["header"]), header.resolve())
         self.assertIn("#pragma chip PIC16F1509", header.read_text(encoding="latin-1"))
+        render.assert_called_once_with(metadata, bit_name_format="combined")
+
+    def test_project_bit_name_format_is_used_for_generated_header(self) -> None:
+        self._write_manifest("generated", bit_name_format="long")
+        metadata = object()
+        with unittest.mock.patch.object(build, "project_metadata", return_value=(None, metadata)), \
+                unittest.mock.patch.object(
+                    build, "render_full_header", return_value="#pragma chip PIC16F1509\n"
+                ) as render:
+            rc, _payload = self._run()
+        self.assertEqual(rc, 0)
+        render.assert_called_once_with(metadata, bit_name_format="long")
 
     def test_refuses_non_generated_mode(self) -> None:
         self._write_manifest("existing")
@@ -1248,6 +1279,112 @@ class GenerateVscodeTasksTests(unittest.TestCase):
         tasks = self._tasks(problem_matcher="$cc5x")
         build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
         self.assertEqual(build_task["problemMatcher"], "$cc5x")
+
+    def test_timeout_threaded_into_build_and_program(self) -> None:
+        tasks = self._tasks(timeout_seconds=120)
+        build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
+        program = next(t for t in tasks if t["label"].startswith("CC5X: Program production"))
+        self.assertIn("--timeout-seconds", build_task["args"])
+        self.assertEqual(build_task["args"][build_task["args"].index("--timeout-seconds") + 1], "120")
+        self.assertIn("--timeout-seconds", program["args"])
+
+    def test_zero_timeout_omits_flag(self) -> None:
+        tasks = self._tasks(timeout_seconds=0)
+        build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
+        self.assertNotIn("--timeout-seconds", build_task["args"])
+
+    def test_flat_manifest_keeps_named_matcher(self) -> None:
+        # main_source next to the manifest -> source dir == workspace folder -> $cc5x unchanged.
+        project = types.SimpleNamespace(editions={"production": {}}, main_source="app.c")
+        tasks = self._tasks(project=project, problem_matcher="$cc5x")
+        build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
+        self.assertEqual(build_task["problemMatcher"], "$cc5x")
+
+    def test_nested_source_reroots_matcher_to_source_dir(self) -> None:
+        # A nested src/main.c must re-root the matcher so CC5X's relative diagnostics resolve
+        # against the source dir, not ${workspaceFolder} (audit: problem-matcher root).
+        project = types.SimpleNamespace(editions={"production": {}}, main_source="src/main.c")
+        tasks = self._tasks(
+            project=project, manifest="firmware/setcc-native.json", problem_matcher="$cc5x"
+        )
+        build_task = next(t for t in tasks if t["label"] == "CC5X: Build production")
+        matcher = build_task["problemMatcher"]
+        self.assertIsInstance(matcher, dict)
+        self.assertEqual(matcher["base"], "$cc5x")
+        self.assertEqual(matcher["fileLocation"], ["autoDetect", "${workspaceFolder}/firmware/src"])
+
+
+class ProjectWritePathJoinTests(unittest.TestCase):
+    """project_write_path_join must keep writes inside the manifest directory (audit:
+    manifest-controlled paths can write outside the project)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.manifest = self.root / "setcc-native.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_in_tree_relative_is_allowed(self) -> None:
+        resolved = build.project_write_path_join(self.manifest, "gen/dev.H")
+        self.assertEqual(resolved, self.root / "gen" / "dev.H")
+
+    def test_parent_escape_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            build.project_write_path_join(self.manifest, "../../etc/evil.H")
+        self.assertIn("outside the project directory", str(ctx.exception))
+
+    def test_absolute_outside_is_rejected(self) -> None:
+        outside = str(self.root.parent / "evil.H")  # sibling of the manifest dir, not inside it
+        with self.assertRaises(SystemExit):
+            build.project_write_path_join(self.manifest, outside, what="generated header")
+
+    def test_env_override_permits_outside_write(self) -> None:
+        outside = self.root.parent / "ok.H"
+        with unittest.mock.patch.dict(os.environ, {build.ALLOW_OUTSIDE_WRITES_ENV: "1"}):
+            resolved = build.project_write_path_join(self.manifest, str(outside))
+        self.assertEqual(resolved, outside)
+
+    def test_resolve_generated_header_enforces_containment(self) -> None:
+        # The dry-run resolver and the real-build writer must agree on containment: resolving a
+        # generated header whose path escapes the project dir raises in BOTH, so a --dry-run
+        # preview cannot look buildable while the real build rejects it (audit: dry-run vs build).
+        project = types.SimpleNamespace(
+            header_mode="generated", header_path=str(self.root.parent / "evil.H")
+        )
+        with self.assertRaises(SystemExit):
+            build.resolve_project_header_path(self.manifest, project)
+        with self.assertRaises(SystemExit):
+            build.ensure_project_header(self.manifest, project)
+
+
+class RejectReservedIpeArgsTests(unittest.TestCase):
+    """Raw --ipe-arg must not smuggle in an operation/device/tool/image flag (audit:
+    raw --ipe-arg can bypass hardware-write confirmation)."""
+
+    def test_benign_arg_allowed(self) -> None:
+        build.reject_reserved_ipe_args(["-W2.5", "-OL"])  # no raise
+
+    def test_hidden_erase_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            build.reject_reserved_ipe_args(["-E"])
+
+    def test_device_and_image_overrides_rejected(self) -> None:
+        for bad in (["-PPIC16F1509"], ["-Fother.hex"], ["-TPPK4"], ["-MP"]):
+            with self.assertRaises(SystemExit):
+                build.reject_reserved_ipe_args(bad)
+
+    def test_ipecmd_command_rejects_reserved_extra_arg(self) -> None:
+        with self.assertRaises(SystemExit):
+            build.ipecmd_command(
+                ipecmd=Path("/x/ipecmd.sh"),
+                device="PIC16F1509",
+                tool="PK4",
+                action="verify",
+                image=Path("a.hex"),
+                extra_args=["-E"],
+            )
 
 
 class ValidateGeneratedHeadersTests(unittest.TestCase):

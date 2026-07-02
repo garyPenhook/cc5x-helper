@@ -113,5 +113,85 @@ class MemoryRangeTests(unittest.TestCase):
         self.assertNotIn("-", header.split("#pragma chip", 1)[1].splitlines()[0])
 
 
+class SanitizedIdentifierCollisionTests(unittest.TestCase):
+    """Two distinct raw pack names that sanitize to the same C identifier must not both be
+    emitted, or the header fails to compile on a duplicate symbol (audit: identifiers collide
+    after sanitization)."""
+
+    def test_colliding_bit_names_emit_one_declaration(self) -> None:
+        base = build_synthetic_metadata()
+        # "RA.0" and "RA-0" both sanitize to "RA_0"; only one bit declaration may survive.
+        fields = [
+            P.IniSfrField(name="RA.0", address=0x00C, bit_position=0, width=1),
+            P.IniSfrField(name="RA-0", address=0x00C, bit_position=1, width=1),
+        ]
+        metadata = dataclasses.replace(base, sfr_fields=fields, sfr_field_count=len(fields))
+        header = render_full_header(metadata)
+        decls = [line for line in header.splitlines() if "RA_0" in line]
+        self.assertEqual(len(decls), 1, decls)
+
+    def test_bit_colliding_with_register_char_is_dropped(self) -> None:
+        # Cross-section collision: an 8-bit SFR "GP_IO" emits `char GP_IO`; a 1-bit field
+        # "GP-IO" sanitizes to the same identifier and must NOT also emit `bit GP_IO`, or the
+        # header declares GP_IO twice across the char/bit namespaces (audit: cross-section).
+        base = build_synthetic_metadata()
+        sfrs = [P.IniSfr(name="GP_IO", address=0x00C, width=8)]
+        fields = [P.IniSfrField(name="GP-IO", address=0x00C, bit_position=0, width=1)]
+        metadata = dataclasses.replace(
+            base,
+            sfrs=sfrs,
+            sfr_count=len(sfrs),
+            sfr_fields=fields,
+            sfr_field_count=len(fields),
+        )
+        header = render_full_header(metadata)
+        decls = [line for line in header.splitlines() if "GP_IO" in line]
+        self.assertEqual(len(decls), 1, decls)
+
+    def test_colliding_sfr_names_emit_one_declaration(self) -> None:
+        base = build_synthetic_metadata()
+        # Two registers at different addresses whose names sanitize alike ("GP IO"/"GP-IO" ->
+        # "GP_IO") must not both declare the same identifier.
+        sfrs = [
+            P.IniSfr(name="GP IO", address=0x00C, width=8),
+            P.IniSfr(name="GP-IO", address=0x00D, width=8),
+        ]
+        metadata = dataclasses.replace(
+            base, sfrs=sfrs, sfr_count=len(sfrs), sfr_fields=[], sfr_field_count=0
+        )
+        header = render_full_header(metadata)
+        decls = [line for line in header.splitlines() if "GP_IO" in line]
+        self.assertEqual(len(decls), 1, decls)
+
+
+class BitNameFormatTests(unittest.TestCase):
+    def _metadata(self) -> P.DeviceMetadata:
+        base = build_synthetic_metadata()
+        sfrs = [*base.sfrs, P.IniSfr(name="ADCON0", address=0x09D, width=8)]
+        fields = [
+            *base.sfr_fields,
+            P.IniSfrField(name="ON", address=0x09D, bit_position=0, width=1),
+            P.IniSfrField(name="GO_nDONE", address=0x09D, bit_position=1, width=1),
+        ]
+        return dataclasses.replace(
+            base, sfrs=sfrs, sfr_count=len(sfrs), sfr_fields=fields, sfr_field_count=len(fields)
+        )
+
+    def test_combined_is_default_and_preserves_short_names(self) -> None:
+        header = render_full_header(self._metadata())
+        self.assertIn("bit ON @ ADCON0.0;", header)
+        self.assertIn("bit GO_nDONE @ ADCON0.1;", header)
+
+    def test_long_format_uses_setcc_register_bit_names(self) -> None:
+        header = render_full_header(self._metadata(), bit_name_format="long")
+        self.assertIn("bit ADCON0_ON @ ADCON0.0;", header)
+        self.assertIn("bit ADCON0_GO_nDONE @ ADCON0.1;", header)
+        self.assertNotIn("bit ON @ ADCON0.0;", header)
+
+    def test_invalid_bit_name_format_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            render_full_header(self._metadata(), bit_name_format="bogus")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ import {
   runHelperJson,
   setProjectDevice,
   syncProjectConfig,
+  timeoutArgs,
   updateEditionConfig,
   workspaceRoot,
 } from './helper';
@@ -762,6 +763,9 @@ async function generateTasks(root: vscode.WorkspaceFolder | undefined): Promise<
         '--helper', helperRelPath(),
         '--problem-matcher', '$cc5x',
         '--tool', programmerTool(),
+        // Bake the configured timeout into the generated tasks so they cannot hang the toolchain
+        // (a VS Code task is not spawned through runHelper and so is not killed by its watchdog).
+        ...timeoutArgs(),
         '--output', outputPath,
       ],
       channel,

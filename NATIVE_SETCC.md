@@ -210,7 +210,11 @@ Render a generated header from the selected device pack:
 
 ```bash
 python3 tools/cc5x_setcc_native.py render-pack-header --device PIC16F15313
+python3 tools/cc5x_setcc_native.py render-pack-header --device PIC16F15313 --bit-name-format long
 ```
+
+Generated headers support the same broad bit-name format choices as SETCC:
+`combined` (default/current behavior), `long` (`REGISTERNAME_BITNAME`), and `short` (`BITNAME`).
 
 Validate generated headers with the real compiler under CrossOver:
 
