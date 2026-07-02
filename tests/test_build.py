@@ -255,9 +255,12 @@ class ProjectBuildReadinessTests(unittest.TestCase):
         project_path, project, edition = build.load_project_and_edition(
             str(self.manifest), "production"
         )
-        command, _cwd = build.prepare_project_build_command(
-            project_path, project, edition, dry_run=True
-        )
+        with unittest.mock.patch.object(
+            build, "render_project_generated_header", return_value="#pragma chip PIC16F1509\n"
+        ):
+            command, _cwd = build.prepare_project_build_command(
+                project_path, project, edition, dry_run=True
+            )
         self.assertFalse(header.exists())
         # The header's directory is still referenced as an include path in the command.
         self.assertIn(f"-I{header.parent}", command)
