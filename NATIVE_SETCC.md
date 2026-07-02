@@ -306,8 +306,7 @@ QT_QPA_PLATFORM=xcb ./dist/cc5x-helper-gui
 
 ## Current Limits
 
-- Header generation is a professional first pass, not full parity with every BKND hand-tuned header.
-- Alias and alternate-bit-name policies still need device-by-device refinement.
+- The complete BKND parity gate covers shipped flash `PIC10F`/`PIC12F`/`PIC16F` headers, not older OTP/EPROM `12C`/`16C` headers.
 - Modern Microchip guidance such as TB3261 must still be translated into CC5X conventions; not every XC8 naming or header pattern should be copied literally.
 - It does not import the opaque `setcc.pxk` format.
 - Header-based config workflows still assume a shipped CC5X header, but pack-native config workflows do not.
@@ -323,6 +322,7 @@ The current generated headers compile successfully with the real CC5X compiler u
 - `PIC12F1501`
 - `PIC12F1840`
 - `PIC16F1509`
+- `PIC16F15244`
 - `PIC16F15313`
 - `PIC16F1789`
 - `PIC16F18325`
@@ -331,6 +331,15 @@ The current generated headers compile successfully with the real CC5X compiler u
 - `PIC16F19195`
 
 Both generated and shipped-header control builds produce successful `.hex` and `.occ` outputs for the minimal validation source.
+
+Run the complete BKND shipped flash-header gate with:
+
+```bash
+PYTHONPATH=tools python3 tools/validate_generated_headers.py --all-shipped --json
+```
+
+`--all-shipped` exits on generated-header parity. Shipped-header control failures are
+reported in the output but are treated as diagnostics for BKND's own header set.
 
 Current local source-availability note:
 

@@ -84,7 +84,7 @@ PIC14EX_ALIAS_WHITELIST = {
 
 # Device architectures the header generator can map to a CC5X `core` value. Anything else
 # is rejected rather than emitted verbatim (audit #6).
-KNOWN_ARCHS = {"PIC12", "PIC14", "PIC14E", "PIC14EX", "PIC16"}
+KNOWN_ARCHS = {"PIC12", "PIC12IE", "PIC14", "PIC14E", "PIC14EX", "PIC16"}
 BIT_NAME_FORMATS = {"combined", "long", "short"}
 DEFAULT_BIT_NAME_FORMAT = "combined"
 
@@ -143,7 +143,7 @@ def _profile_for_arch(arch: str | None) -> HeaderProfile:
             wide_const_guard=None,
             wide_const_value=None,
         )
-    if arch == "PIC12":
+    if arch in {"PIC12", "PIC12IE"}:
         return HeaderProfile(
             core="12",
             define_int_style=False,
@@ -165,6 +165,10 @@ def _profile_for_arch(arch: str | None) -> HeaderProfile:
         f"unsupported device architecture {(arch or '(none)')!r}; "
         f"the header generator maps only {', '.join(sorted(KNOWN_ARCHS))}"
     )
+
+
+def _is_pic12_core(metadata: DeviceMetadata) -> bool:
+    return (metadata.ini_arch or "").upper() in {"PIC12", "PIC12IE"}
 
 
 def _sum_range_bytes(ranges: list[MemoryRange]) -> int:
@@ -203,7 +207,7 @@ def _render_chip_pragma(metadata: DeviceMetadata) -> list[str]:
     if ram_bytes:
         line += f" // {ram_bytes} bytes"
     lines = [line]
-    if metadata.common_ranges:
+    if metadata.common_ranges and not _is_pic12_core(metadata):
         first_common = metadata.common_ranges[0]
         lines.append(
             f"#pragma ramdef  0x{first_common.start:X} : 0x{first_common.end:X} mapped_into_all_banks"
@@ -233,7 +237,7 @@ def _render_header_prelude(metadata: DeviceMetadata) -> list[str]:
 
 def _predefined_comment_lines(metadata: DeviceMetadata) -> list[str]:
     arch = (metadata.ini_arch or "").upper()
-    if arch == "PIC12":
+    if _is_pic12_core(metadata):
         return [
             "/* Predefined:",
             "  char W;",
@@ -270,18 +274,43 @@ def _predefined_comment_lines(metadata: DeviceMetadata) -> list[str]:
 
 
 def _predefined_registers(metadata: DeviceMetadata) -> set[str]:
+    if _is_pic12_core(metadata):
+        return {
+            "INDF",
+            "TMR0",
+            "PCL",
+            "STATUS",
+            "FSR",
+            "OPTION",
+            "PORTA",
+            "PORTB",
+            "PORTC",
+            "TRISA",
+            "TRISB",
+            "TRISC",
+        }
     arch = (metadata.ini_arch or "").upper()
-    if arch == "PIC12":
-        return {"INDF", "TMR0", "PCL", "STATUS", "FSR", "OPTION"}
     if arch == "PIC14":
-        return {"INDF", "TMR0", "PCL", "STATUS", "FSR", "PORTA", "OPTION", "PCLATH", "INTCON"}
+        return {
+            "INDF",
+            "TMR0",
+            "PCL",
+            "STATUS",
+            "FSR",
+            "PORTA",
+            "OPTION",
+            "PCLATH",
+            "INTCON",
+            "TRISA",
+            "TRISB",
+        }
     return set(ENHANCED_PREDEFINED_REGISTERS)
 
 
 def _predefined_bit_names(metadata: DeviceMetadata) -> set[str]:
+    if _is_pic12_core(metadata):
+        return {"Carry", "DC", "Zero_", "PD", "TO", "PA0", "PA1", "PA2", "FSR_5", "FSR_6"}
     arch = (metadata.ini_arch or "").upper()
-    if arch == "PIC12":
-        return {"Carry", "DC", "Zero_", "PD", "TO"}
     if arch == "PIC14":
         return {
             "Carry",
@@ -440,7 +469,7 @@ def _render_bit_section(
     # them. The baseline 12-bit core has no interrupt system and no INTCON (confirmed via
     # datasheet), so skip it there -- injecting it would mislabel whatever register the pack
     # places at 0x0B.
-    if (metadata.ini_arch or "").upper() != "PIC12":
+    if not _is_pic12_core(metadata):
         register_names.update(
             {
                 0x0B: "INTCON",

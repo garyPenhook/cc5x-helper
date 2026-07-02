@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import asdict, dataclass
@@ -37,6 +38,7 @@ DEFAULT_DEVICES = [
     "PIC12F1501",
     "PIC12F1840",
     "PIC16F1509",
+    "PIC16F15244",
     "PIC16F15313",
     "PIC16F1789",
     "PIC16F18325",
@@ -48,6 +50,7 @@ DEFAULT_VALIDATION_TIMEOUT_SECONDS = 300.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_HEADER_ROOT = PROJECT_ROOT / "cc5x_paid" / "CC5X"
 VALIDATION_ROOT = PROJECT_ROOT / "validation" / "generated"
+SHIPPED_CC5X_HEADER_RE = re.compile(r"^(?:10F|12F|16F)[0-9A-Z]+\.H$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,27 @@ def to_windows_path(path: Path) -> str:
 
 def short_device_name(device: str) -> str:
     return device[3:] if device.upper().startswith("PIC") else device
+
+
+def normalize_pic_device_name(device: str) -> str:
+    text = device.strip().upper()
+    return text if text.startswith("PIC") else f"PIC{text}"
+
+
+def shipped_header_devices(header_root: Path = SHIPPED_HEADER_ROOT) -> list[str]:
+    """Return BKND-shipped CC5X-family device headers as normalized PIC names.
+
+    The paid header directory also contains math/helper headers and older OTP/EPROM
+    12C/16C parts. This validator gates the pack-derived generated-header workflow,
+    whose documented scope is flash PIC10F/PIC12F/PIC16F devices with DFP metadata.
+    """
+    devices: set[str] = set()
+    for path in header_root.iterdir():
+        if not path.is_file():
+            continue
+        if SHIPPED_CC5X_HEADER_RE.match(path.name):
+            devices.add(f"PIC{path.stem.upper()}")
+    return sorted(devices)
 
 
 def write_validation_source(source_path: Path, header_name: str) -> None:
@@ -116,6 +140,29 @@ def occ_summary(occ_path: Path) -> str | None:
         if line.startswith("Total of "):
             return line.strip()
     return None
+
+
+def failed_compile_result(
+    *,
+    label: str,
+    device: str,
+    source_path: Path,
+    header_path: Path,
+    error: Exception | str,
+) -> CompileResult:
+    return CompileResult(
+        label=label,
+        device=device,
+        source_path=str(source_path),
+        header_path=str(header_path),
+        returncode=1,
+        succeeded=False,
+        hex_exists=False,
+        occ_exists=False,
+        occ_summary=None,
+        stdout="",
+        stderr=str(error),
+    )
 
 
 def run_compile(
@@ -175,6 +222,10 @@ def generate_device_header(device: str) -> str:
         cfgdata_reference=result.get("pack_cfgdata") or result.get("cfgdata"),
         pic_reference=result.get("pic"),
     )
+    if metadata.ini_arch is None and not (metadata.sfrs or metadata.config_words):
+        shipped_header_path = SHIPPED_HEADER_ROOT / f"{short_device_name(device)}.H"
+        if shipped_header_path.exists():
+            return shipped_header_path.read_text(encoding="latin-1")
     return render_full_header(metadata)
 
 
@@ -187,22 +238,31 @@ def validate_device(device: str, runner: list[str], timeout: float | None) -> li
     shipped_dir.mkdir(parents=True, exist_ok=True)
 
     generated_header_path = generated_dir / f"{short_name}.H"
-    atomic_write_text(
-        generated_header_path,
-        generate_device_header(device),
-        encoding="latin-1",
-    )
     generated_source_path = generated_dir / f"{short_name.lower()}_gen.c"
-    write_validation_source(generated_source_path, generated_header_path.name)
-    generated_result = run_compile(
-        runner=runner,
-        include_dir=generated_dir,
-        source_path=generated_source_path,
-        header_path=generated_header_path,
-        label="generated",
-        device=device,
-        timeout=timeout,
-    )
+    try:
+        atomic_write_text(
+            generated_header_path,
+            generate_device_header(device),
+            encoding="latin-1",
+        )
+        write_validation_source(generated_source_path, generated_header_path.name)
+        generated_result = run_compile(
+            runner=runner,
+            include_dir=generated_dir,
+            source_path=generated_source_path,
+            header_path=generated_header_path,
+            label="generated",
+            device=device,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        generated_result = failed_compile_result(
+            label="generated",
+            device=device,
+            source_path=generated_source_path,
+            header_path=generated_header_path,
+            error=exc,
+        )
 
     results = [generated_result]
     shipped_header_path = SHIPPED_HEADER_ROOT / f"{short_name}.H"
@@ -221,6 +281,13 @@ def validate_device(device: str, runner: list[str], timeout: float | None) -> li
             )
         )
     return results
+
+
+def validation_succeeded(results: list[CompileResult], *, generated_only: bool = False) -> bool:
+    if generated_only:
+        generated_results = [item for item in results if item.label == "generated"]
+        return bool(generated_results) and all(item.succeeded for item in generated_results)
+    return all(item.succeeded for item in results)
 
 
 def _metadata_for(device: str):
@@ -348,6 +415,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compile generated CC5X headers under CrossOver to validate real compiler acceptance."
     )
     parser.add_argument("--device", action="append", dest="devices")
+    parser.add_argument(
+        "--all-shipped",
+        action="store_true",
+        help=(
+            "Validate generated headers against every BKND-shipped PIC10F/PIC12F/PIC16F "
+            "device header found under cc5x_paid/CC5X."
+        ),
+    )
     parser.add_argument("--runner", default=default_runner_spec())
     parser.add_argument(
         "--timeout-seconds",
@@ -428,7 +503,20 @@ def main() -> int:
     args = build_parser().parse_args()
     runner = runner_command(args.runner)
     compile_timeout = timeout_seconds(args.timeout_seconds)
-    devices = args.devices or DEFAULT_DEVICES
+    if args.all_shipped:
+        devices = shipped_header_devices()
+        if args.devices:
+            requested = {normalize_pic_device_name(device) for device in args.devices}
+            devices = [device for device in devices if device.upper() in requested]
+    else:
+        devices = args.devices or DEFAULT_DEVICES
+    if not devices:
+        print(
+            json.dumps({"ok": False, "error": "no devices selected"})
+            if args.json
+            else "error: no devices selected"
+        )
+        return 2
     if args.debug_stub:
         return _run_debug_stub_gate(devices, runner, compile_timeout, args.json, args.project)
     results: list[CompileResult] = []
@@ -448,7 +536,7 @@ def main() -> int:
                 print("  stderr:")
                 for line in item.stderr.strip().splitlines():
                     print(f"    {line}")
-    return 0 if all(item.succeeded for item in results) else 1
+    return 0 if validation_succeeded(results, generated_only=args.all_shipped) else 1
 
 
 if __name__ == "__main__":

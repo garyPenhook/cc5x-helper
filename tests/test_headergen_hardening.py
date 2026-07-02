@@ -19,12 +19,26 @@ from test_golden import build_synthetic_metadata
 
 class UnknownArchitectureTests(unittest.TestCase):
     def test_unknown_arch_is_rejected(self) -> None:
-        # PIC12E/PIC12IE baseline parts (e.g. PIC16F527) match the CC5X device prefixes but
-        # have no mapped core; previously they emitted `core pic12e` silently.
+        # Unsupported baseline-ish architecture strings must not be emitted as
+        # `core pic12e` silently.
         metadata = dataclasses.replace(build_synthetic_metadata(), ini_arch="PIC12E")
         with self.assertRaises(ValueError) as ctx:
             render_full_header(metadata)
         self.assertIn("PIC12E", str(ctx.exception))
+
+    def test_pic12ie_arch_maps_to_12_bit_core(self) -> None:
+        # PIC16F527/PIC16F570 pack metadata uses PIC12IE for a CC5X 12-bit-core family.
+        metadata = dataclasses.replace(build_synthetic_metadata(), ini_arch="PIC12IE")
+        header = render_full_header(metadata)
+        self.assertIn("#pragma chip PIC16FSYN1, core 12", header)
+        self.assertIn("char INDF, TMR0, PCL, STATUS, FSR;", header)
+
+    def test_pic12_core_does_not_emit_common_ramdef(self) -> None:
+        # CC5X already maps common RAM for 12-bit-core parts; emitting ramdef for the
+        # same span produces "Duplicate definition of mapped RAM".
+        metadata = dataclasses.replace(build_synthetic_metadata(), ini_arch="PIC12")
+        header = render_full_header(metadata)
+        self.assertNotIn("#pragma ramdef", header)
 
     def test_empty_arch_is_rejected(self) -> None:
         for bad in (None, "", "   "):
@@ -111,6 +125,55 @@ class MemoryRangeTests(unittest.TestCase):
         metadata = dataclasses.replace(base, ram_ranges=[P.MemoryRange(start=0x80, end=0x20)])
         header = render_full_header(metadata)
         self.assertNotIn("-", header.split("#pragma chip", 1)[1].splitlines()[0])
+
+
+class PredefinedAliasTests(unittest.TestCase):
+    def test_pic12_port_alias_is_suppressed_but_gpio_survives(self) -> None:
+        sfrs = [
+            P.IniSfr(name="GPIO", address=0x6, width=8),
+            P.IniSfr(name="PORTB", address=0x6, width=8),
+        ]
+        metadata = dataclasses.replace(
+            build_synthetic_metadata(),
+            ini_arch="PIC12",
+            sfrs=sfrs,
+            sfr_fields=[],
+        )
+        header = render_full_header(metadata)
+        self.assertIn("char GPIO @ 0x6;", header)
+        self.assertNotIn("PORTB", header)
+
+    def test_pic12_page_select_bits_are_suppressed(self) -> None:
+        fields = [
+            P.IniSfrField(name="PA0", address=0x66, bit_position=5, width=1),
+            P.IniSfrField(name="PA1", address=0x66, bit_position=6, width=1),
+            P.IniSfrField(name="PA2", address=0x66, bit_position=7, width=1),
+        ]
+        metadata = dataclasses.replace(
+            build_synthetic_metadata(),
+            ini_arch="PIC12IE",
+            sfrs=[P.IniSfr(name="ISTATUS", address=0x66, width=8)],
+            sfr_fields=fields,
+        )
+        header = render_full_header(metadata)
+        self.assertNotIn("bit PA0", header)
+        self.assertNotIn("bit PA1", header)
+        self.assertNotIn("bit PA2", header)
+
+    def test_pic14_trisa_alias_is_suppressed(self) -> None:
+        sfrs = [
+            P.IniSfr(name="TRISIO", address=0x85, width=8),
+            P.IniSfr(name="TRISA", address=0x85, width=8),
+        ]
+        metadata = dataclasses.replace(
+            build_synthetic_metadata(),
+            ini_arch="PIC14",
+            sfrs=sfrs,
+            sfr_fields=[],
+        )
+        header = render_full_header(metadata)
+        self.assertIn("#pragma char TRISIO @ 0x85", header)
+        self.assertNotIn("TRISA", header)
 
 
 class SanitizedIdentifierCollisionTests(unittest.TestCase):

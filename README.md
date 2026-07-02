@@ -476,6 +476,7 @@ Real-compiler header validation (needs a working compiler + runner):
 
 ```bash
 uv run python tools/validate_generated_headers.py --json
+uv run python tools/validate_generated_headers.py --all-shipped --json
 ```
 
 ---
@@ -491,6 +492,12 @@ Compiler-validated generated headers currently exist for:
 - `PIC16F1509`, `PIC16F15244`, `PIC16F15313`, `PIC16F1789`, `PIC16F18325`, `PIC16F18446`, `PIC16F18857`, `PIC16F19195`
 
 Validation uses the real `CC5X.EXE` under CrossOver/Wine.
+
+For BKND-header parity work, `--all-shipped` expands the gate to every shipped
+`PIC10F`/`PIC12F`/`PIC16F` device header found under `cc5x_paid/CC5X`, compiling
+both the generated header and the shipped-header control for each device. Its exit
+status gates generated-header success; shipped-control failures are still reported in
+the JSON/text output as third-party header diagnostics.
 
 ---
 
@@ -510,7 +517,6 @@ Validation uses the real `CC5X.EXE` under CrossOver/Wine.
 
 ## Limitations
 
-- Header generation is intentionally deterministic, but it is not yet full parity with every BKND hand-tuned header.
-- Alias-heavy areas such as EUSART and MSSP still need additional compatibility refinement.
+- The generated-header parity gate covers the BKND-shipped flash `PIC10F`/`PIC12F`/`PIC16F` headers that map to pack metadata; older OTP/EPROM `12C`/`16C` headers remain outside the pack-driven generator scope.
 - The manifest workflow covers the useful persisted state from `setcc.pxk`, not every GUI preference.
 - This repo does not bundle proprietary CC5X binaries or Microchip packs as tracked source files.

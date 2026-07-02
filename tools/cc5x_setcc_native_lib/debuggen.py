@@ -1349,7 +1349,8 @@ def _render_rx_handler(config: DebugConfig, eu: EusartRegs, metadata: DeviceMeta
         lines += [
             "    } else if (type == CDL_T_SET_BP) {",
             "        if (len != 1) { cdl_nak(seq, CDL_NAK_BAD_LEN); return; }  // exact: one bp_id",
-            f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}  // don't ACK a BP that can never fire",
+            f"        if (cdl_rx[3] >= {MAX_BP}) {{ cdl_nak(seq, CDL_NAK_BAD_BP); return; }}  "
+            "// don't ACK a BP that can never fire",
             "        cdl_bp_mask |= cdl_bitmask(cdl_rx[3]);",
             "        cdl_ack(seq);",
             "    } else if (type == CDL_T_CLR_BP) {",

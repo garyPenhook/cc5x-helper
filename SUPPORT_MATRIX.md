@@ -47,6 +47,17 @@ For the minimal validation source, each successful build produced:
 - `.occ`
 - `Total of 3 code words (0 %)`
 
+To run the complete BKND flash-header parity gate instead of the sampled default set:
+
+```bash
+uv run python tools/validate_generated_headers.py --all-shipped --json
+```
+
+That mode enumerates every shipped `PIC10F`/`PIC12F`/`PIC16F` device header under
+`cc5x_paid/CC5X` and compiles both the generated header and the shipped-header control.
+The command exits on generated-header parity; shipped-control failures remain visible in
+the report but do not make BKND's own header typo a generated-header failure.
+
 ## Pack-Discoverable Scope On This Machine
 
 The installed local `.atpack` files currently expose a broad `10F`/`12F`/`16F` population:
@@ -81,7 +92,9 @@ This is useful for:
 - alias-policy refinement
 - control builds during validation
 
-But shipped headers are not treated as authoritative coverage for newer devices.
+The complete flash-device set is now directly runnable through `--all-shipped`. Shipped
+headers are still not treated as authoritative coverage for newer devices that BKND never
+published.
 
 ## `10F` Status
 
@@ -106,11 +119,12 @@ The current implementation is strong enough to claim:
 
 - pack-native config workflows for locally available `10F`/`12F`/`16F` devices
 - real-compiler-validated generated headers for the thirteen devices listed above
+- generated-vs-shipped validation for every BKND-shipped flash `PIC10F`/`PIC12F`/`PIC16F` header via `--all-shipped`
 - CrossOver-backed validation workflow repeatability
 - a first-pass open project workflow via `setcc-native.json`, including manifest init, validation, config sync, and manifest-driven builds
 
 It is not yet complete enough to claim:
 
 - full validated coverage of all local `10F`/`12F`/`16F` packs
-- finished parity with every BKND hand-tuned header
+- generated-header parity for older OTP/EPROM `12C`/`16C` BKND headers outside the pack-driven scope
 - full parity with every `setcc.pxk` GUI preference or edition behavior
