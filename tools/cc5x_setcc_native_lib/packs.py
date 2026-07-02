@@ -168,9 +168,15 @@ def unpacked_pack_roots() -> list[Path]:
     return roots
 
 
+# `pack_updates.default_download_dir()` falls back to this same constant (rather than a
+# second literal) so the two never drift apart.
+DEFAULT_ATPACK_DOWNLOAD_DIR = Path.home() / ".cc5x" / "atpacks"
+
+
 def discover_atpack_dirs() -> list[Path]:
     dirs = _env_path_list("CC5X_ATPACK_DIRS")
     dirs.extend([
+        DEFAULT_ATPACK_DOWNLOAD_DIR,  # `packs-update`'s default download dir
         Path.home() / "apps",
         Path.home() / "Downloads",
     ])

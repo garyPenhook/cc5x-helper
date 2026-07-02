@@ -34,6 +34,7 @@ try:
         parse_version,
         device_short_name,
     )
+    from cc5x_setcc_native_lib import pack_updates
     from cc5x_setcc_native_lib.picmeta import load_device_metadata
     from cc5x_setcc_native_lib.debuggen import generate_debug_stub
     from cc5x_setcc_native_lib.cdl_monitor import Event, Monitor, MonitorMap
@@ -76,6 +77,7 @@ except ModuleNotFoundError:
         parse_version,
         device_short_name,
     )
+    from tools.cc5x_setcc_native_lib import pack_updates
     from tools.cc5x_setcc_native_lib.picmeta import load_device_metadata
     from tools.cc5x_setcc_native_lib.debuggen import generate_debug_stub
     from tools.cc5x_setcc_native_lib.cdl_monitor import Event, Monitor, MonitorMap
@@ -2761,6 +2763,103 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report["ready"] else 1
 
 
+def _packs_check_requested_families(args: argparse.Namespace) -> dict[str, str | None]:
+    """Resolve --family (repeatable) against locally known pack families.
+
+    An explicitly requested family not found locally is still checked (with
+    ``local_version=None``) rather than rejected — the point of `--family` is to let
+    you ask about a pack you don't have yet.
+    """
+    local = pack_updates.known_local_families()
+    if not args.family:
+        return local
+    return {name: local.get(name) for name in args.family}
+
+
+def cmd_packs_check(args: argparse.Namespace) -> int:
+    requested = _packs_check_requested_families(args)
+    if not requested:
+        message = (
+            "no locally known PIC10F/12F/16F pack families to check "
+            "(pass --family NAME to check one that isn't installed yet)"
+        )
+        if args.json:
+            print(json.dumps({"ok": False, "error": {"kind": "no_families", "message": message}}, indent=2))
+            return 1
+        print(message, file=sys.stderr)
+        return 1
+
+    results = pack_updates.check_for_updates(requested)
+
+    if args.json:
+        print(json.dumps([result.__dict__ for result in results], indent=2))
+        return 0
+    for result in results:
+        local = result.local_version or "(not installed)"
+        marker = "UPDATE AVAILABLE" if result.update_available else "up to date"
+        date = result.latest_date or "unknown date"
+        print(f"{result.family}: local {local} -> latest {result.latest_version} ({date}) [{marker}]")
+    return 0
+
+
+def cmd_packs_update(args: argparse.Namespace) -> int:
+    requested = _packs_check_requested_families(args)
+    if not requested:
+        message = (
+            "no locally known PIC10F/12F/16F pack families to update "
+            "(pass --family NAME to fetch one that isn't installed yet)"
+        )
+        if args.json:
+            print(json.dumps({"ok": False, "error": {"kind": "no_families", "message": message}}, indent=2))
+            return 1
+        print(message, file=sys.stderr)
+        return 1
+
+    dest_dir = Path(args.dest).expanduser() if args.dest else pack_updates.default_download_dir()
+    statuses = pack_updates.check_for_updates(requested)
+
+    entries = []
+    already_current = []
+    for status in statuses:
+        if not (status.update_available or args.force):
+            already_current.append(status.family)
+            continue
+        entry = {"family": status.family, "version": status.latest_version}
+        if args.dry_run:
+            entry["action"] = "would-download"
+        else:
+            try:
+                path = pack_updates.download_pack(status.family, status.latest_version, dest_dir)
+                entry["action"] = "downloaded"
+                entry["path"] = str(path)
+            except pack_updates.PackUpdateError as exc:
+                entry["action"] = "failed"
+                entry["error"] = str(exc)
+        entries.append(entry)
+    failed = any(entry["action"] == "failed" for entry in entries)
+
+    if args.json:
+        print(
+            json.dumps(
+                {"dest": str(dest_dir), "updated": entries, "already_current": already_current},
+                indent=2,
+            )
+        )
+        return 1 if failed else 0
+
+    if not entries:
+        print("all checked pack families are already at the latest published version")
+        return 0
+    for entry in entries:
+        if entry["action"] == "would-download":
+            print(f"{entry['family']}: would download {entry['version']} -> {dest_dir}")
+        elif entry["action"] == "downloaded":
+            print(f"{entry['family']}: downloaded {entry['version']} -> {entry['path']}")
+        else:
+            print(f"{entry['family']}: FAILED ({entry['error']})", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Native Linux helper for CC5X workflows that SETCC.EXE currently covers."
@@ -2812,6 +2911,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=json_error_boundary(cmd_doctor))
+
+    packs_family_help = (
+        "Pack family name (e.g. PIC16F1xxxx_DFP), repeatable. Default: every family "
+        "backing a locally discovered PIC10F/12F/16F device."
+    )
+
+    packs_check = subparsers.add_parser(
+        "packs-check",
+        help="Query packs.download.microchip.com for newer device-pack releases (network, read-only).",
+    )
+    packs_check.add_argument("--family", action="append", help=packs_family_help)
+    packs_check.add_argument("--json", action="store_true")
+    packs_check.set_defaults(func=json_error_boundary(cmd_packs_check))
+
+    packs_update = subparsers.add_parser(
+        "packs-update",
+        help="Download newer device-pack .atpack archives from packs.download.microchip.com.",
+    )
+    packs_update.add_argument("--family", action="append", help=packs_family_help)
+    packs_update.add_argument(
+        "--dest",
+        help=f"Directory to save downloaded .atpack files to (default: {pack_updates.default_download_dir()}).",
+    )
+    packs_update.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even families already at the latest published version.",
+    )
+    packs_update.add_argument("--dry-run", action="store_true", help="Report what would download without fetching it.")
+    packs_update.add_argument("--json", action="store_true")
+    packs_update.set_defaults(func=json_error_boundary(cmd_packs_update))
 
     project_init = subparsers.add_parser(
         "project-init",

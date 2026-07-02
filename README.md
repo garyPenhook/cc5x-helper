@@ -23,6 +23,7 @@ CrossOver/Wine builds, and optional IPECMD flashing, all from one checked-in man
 - [Installation](#installation)
 - [Setup](#setup)
   - [Shrink a full MPLAB X install](#5-optional-shrink-a-full-mplab-x-install)
+  - [Check for newer device packs](#6-optional-check-for-newer-device-packs)
 - [Usage — CLI](#usage--cli)
 - [Usage — Desktop GUI](#usage--desktop-gui)
 - [Usage — VS Code extension](#usage--vs-code-extension)
@@ -255,13 +256,34 @@ machine:
   uv run cc5x-helper doctor
   ```
 
+### 6. (Optional) Check for newer device packs
+
+MPLAB X's bundled pack cache (or a manually downloaded `.atpack`) is a point-in-time
+snapshot; Microchip keeps publishing newer `_DFP` releases after you install. `packs-check`
+queries `packs.download.microchip.com` (read-only, network) for the latest published
+version of every pack family backing a locally discovered `PIC10F`/`PIC12F`/`PIC16F`
+device, and `packs-update` downloads (and SHA-256-verifies) any that are newer:
+
+```bash
+uv run cc5x-helper packs-check
+uv run cc5x-helper packs-update            # downloads newer .atpack archives
+uv run cc5x-helper packs-update --dry-run  # preview without downloading
+uv run cc5x-helper packs-update --family PIC16F1xxxx_DFP --force  # re-fetch one family
+```
+
+Both commands only ever run when you invoke them — no other command makes a network
+call. Downloads land in `~/.cc5x/atpacks` by default (already included in `--dest`'s
+default and in `discover_atpack_dirs()`'s scan list, so a fresh download is picked up
+immediately by every other command); set `CC5X_ATPACK_DIRS` first to redirect them
+elsewhere, or pass `--dest`.
+
 ### Environment variables
 
 | Variable | Purpose |
 |----------|---------|
 | `CC5X_COMPILER` | Path to `CC5X.EXE` (overrides the default repo path) |
 | `CC5X_RUNNER` | Launcher used to run the Windows compiler (e.g. `wine {compiler}` or a wrapper script; a bare interpreter needs the `{compiler}` placeholder) |
-| `CC5X_ATPACK_DIRS` | `:`-separated dirs containing `Microchip.*.atpack` archives |
+| `CC5X_ATPACK_DIRS` | `:`-separated dirs containing `Microchip.*.atpack` archives; `packs-update` also downloads to its first entry |
 | `CC5X_PACK_ROOTS` / `MPLABX_PACKS` | `:`-separated roots of unpacked `<family>/<version>/…` pack trees |
 | `CC5X_IPECMD` | Path to `ipecmd.sh`/`ipecmd.exe` for the `program` command |
 
