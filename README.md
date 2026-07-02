@@ -22,6 +22,7 @@ CrossOver/Wine builds, and optional IPECMD flashing, all from one checked-in man
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Setup](#setup)
+  - [Shrink a full MPLAB X install](#5-optional-shrink-a-full-mplab-x-install)
 - [Usage — CLI](#usage--cli)
 - [Usage — Desktop GUI](#usage--desktop-gui)
 - [Usage — VS Code extension](#usage--vs-code-extension)
@@ -212,6 +213,47 @@ installed MPLAB X versions, or set `CC5X_IPECMD`:
 ```bash
 export CC5X_IPECMD="/opt/microchip/mplabx/v6.30/mplab_platform/mplab_ipe/ipecmd.sh"
 ```
+
+### 5. (Optional) Shrink a full MPLAB X install
+
+This tool never touches the MPLAB X IDE itself — only `mplab_platform/mplab_ipe`
+(the `ipecmd` CLI), `mplab_platform/bin` (its launcher dependency,
+`common-vars.sh`), the bundled JRE under `sys/java/…`, and whichever
+`packs/Microchip/<family>_DFP` / `<tool>_TP` directories match your devices and
+programmer. A stock MPLAB X install is ~7GB; the pieces above are typically
+under 2GB.
+
+`scripts/prune_mplabx.sh` deletes everything else **in place** (full IDE, MCC,
+docs, ARM packs, unused device families, unused programmer tool packs). Review
+it before running — it needs `sudo` since MPLAB X is usually root-owned, and
+it's destructive against a real install outside this repo.
+
+```bash
+sudo sh scripts/prune_mplabx.sh /opt/microchip/mplabx/v6.30
+```
+
+By default it keeps the `PIC10F`/`PIC12F`/`PIC16F` pack families this repo
+supports (`PIC10-12Fxxx_DFP`, `PIC12-16F1xxx_DFP`, `PIC16F1xxxx_DFP`,
+`PIC16Fxxx_DFP`) plus `PICkit4_TP` and `PICkit5_TP`. Before running it on a new
+machine:
+
+- Edit the `PICkit4_TP PICkit5_TP` keep-list in the script to match the
+  programmer(s) you actually own (`SNAP` → `Snap_TP`, `ICD4` → `ICD4_TP`, etc.
+  — list the exact directory names under `packs/Microchip` on your machine).
+- If you add support for a device outside `PIC10F`/`PIC12F`/`PIC16F`, add its
+  pack family to the keep-list first, or the prune will delete metadata you need.
+- **Do not relocate the pruned directory tree.** `ipecmd.sh` and
+  `common-vars.sh` hardcode the JRE path (`sys/java/zulu8…`) as an *absolute*
+  path baked in at install time — pruning in place keeps that path valid;
+  copying the result elsewhere breaks it unless you also patch those two
+  scripts.
+- After pruning, confirm `ipecmd` still runs and `doctor` still reports
+  the expected devices:
+
+  ```bash
+  /opt/microchip/mplabx/v6.30/mplab_platform/mplab_ipe/ipecmd.sh -P PIC16F1509 -TPPK4
+  uv run cc5x-helper doctor
+  ```
 
 ### Environment variables
 
